@@ -10,7 +10,7 @@ This repo is built around a single orchestrator job that:
    3.2) Pertinent simulation data, external calculations, and title information are stored in meta.json
    3.3) Beam informatics and statistics are stored in Beam_Metrics.json
    3.4) Information about simulation runtime & breakdown of highest utilization is presented in timing.json
-   3.5) Predictions about beam propagation down a tube of length "X_RIGHT_PHYS_M" (default 0.55 m)
+   3.5) Predictions about beam propagation down a tube of length "X_RIGHT_PHYS_M" (default 0.55 m) can be found in Beam_Envelope.json
 5) Update_runlog_compact.py compiles individual result files into a single master CSV file. Default conversion does not include all information from .json files for readability.
 6) Plot_runlog_compact.py can be run by CLI to generate plotted information from the compact csv for both scatter plots and heatmaps (Further utility is yet to be implemented).
 
