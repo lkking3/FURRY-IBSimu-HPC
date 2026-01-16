@@ -35,13 +35,9 @@ Your run outputs will live under:
 Below are the “big levers” you’ll most likely touch when doing parameter studies.
 
 1) Sweep resources / scheduling
-
 These control cost and throughput (per array element):
-
    SWEEP_CPUS, SWEEP_MEM, SWEEP_TIME, SWEEP_PART
-   
    ARRAY_CONC (how many array tasks run at once)
-   
    MAX_ARRAY_CHUNK (array chunking limit for scheduler friendliness)
 
 3) Results naming / location
