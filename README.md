@@ -36,13 +36,13 @@ Below are the “big levers” you’ll most likely touch when doing parameter s
 
 1) Sweep resources / scheduling
 These control cost and throughput (per array element):
-   SWEEP_CPUS, SWEEP_MEM, SWEEP_TIME, SWEEP_PART
-   ARRAY_CONC (how many array tasks run at once)
-   MAX_ARRAY_CHUNK (array chunking limit for scheduler friendliness)
+   **SWEEP_CPUS**, **SWEEP_MEM**, **SWEEP_TIME**, **SWEEP_PART**
+   **ARRAY_CONC** (how many array tasks run at once)
+   **MAX_ARRAY_CHUNK** (array chunking limit for scheduler friendliness)
 
 3) Results naming / location
-   RESULTS_DIR (defaults to ./results)
-   RUN_PREFIX (prefix for run directories)
+   **RESULTS_DIR** (defaults to ./results)
+   **RUN_PREFIX** (prefix for run directories)
 
 4) Core geometry sweep lists (Stage-1)
 These define the parameter sweep grid:
