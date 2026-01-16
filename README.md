@@ -35,16 +35,20 @@ Your run outputs will live under:
 Below are the “big levers” you’ll most likely touch when doing parameter studies.
 
 1) Sweep resources / scheduling
+
 These control cost and throughput (per array element):
+
    SWEEP_CPUS, SWEEP_MEM, SWEEP_TIME, SWEEP_PART
+   
    ARRAY_CONC (how many array tasks run at once)
+   
    MAX_ARRAY_CHUNK (array chunking limit for scheduler friendliness)
 
-2) Results naming / location
+3) Results naming / location
    RESULTS_DIR (defaults to ./results)
    RUN_PREFIX (prefix for run directories)
 
-3) Core geometry sweep lists (Stage-1)
+4) Core geometry sweep lists (Stage-1)
 These define the parameter sweep grid:
    **AP_RAD_LIST** — aperture radius
    **GRID_T_LIST** — grid thickness
@@ -52,12 +56,12 @@ These define the parameter sweep grid:
 Chamfers (usually left at 0 unless you’re explicitly studying them):
    **SCR_*** and **ACC_*** lists: depths + angles
 
-4) Electrical potentials
+5) Electrical potentials
    **VS_V** — screen potential (acceleration voltage reference)
    **VA_V** — accel/tube potential
    **SAMPLE_V** — sample/endplate potential (often equals VA_V)
 
-5) Physics toggles (field-only vs ions)
+6) Physics toggles (field-only vs ions)
    **ENABLE_IONS_STAGE1** — set to 0 for fast field-only scans, 1 for plasma/beam iterations
    **ENABLE_IONS_STAGE2** — usually 1 if Stage-2 is meant to evaluate real beam performance
 Plasma / source controls:
@@ -66,7 +70,7 @@ Plasma / source controls:
    **ION_J_SCALE** (current density scale factor)
    **SC_FACTOR** (space charge scaling / neutralization proxy)
 
-6) Drift truncation + footprint prediction (compute saver)
+7) Drift truncation + footprint prediction (compute saver)
 If you truncate the drift (short X_RIGHT_M) but want performance at a longer physical drift:
    **X_RIGHT_M** — simulated drift length
    **X_RIGHT_PHYS_M** (or equivalent in your build) — “real” drift length for prediction
