@@ -31,7 +31,7 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
-ibsimu.set_thread_count(2)
+
 // ---------- env helpers ----------
 static double envd(const char* k, double vdef) {
     if (const char* s = std::getenv(k)) {
@@ -131,12 +131,13 @@ static std::string add_suffix_before_ext(const std::string &path, const std::str
 
 
 // ---------- globals for FuncSolid ----------
-static double g_a   = 0.0;   // base aperture radius [m]
-static double g_xs0 = 0.0;   // screen start x
-static double g_xs1 = 0.0;   // screen end x
-static double g_xa0 = 0.0;   // accel start x
-static double g_xa1 = 0.0;   // accel end x
-static double g_off = 0.0;   // accelerator aperture y-offset [m]
+static double g_a        = 0.0;   // base aperture radius [m]
+static double g_xs0      = 0.0;   // screen start x
+static double g_xs1      = 0.0;   // screen end x
+static double g_xa0      = 0.0;   // accel start x
+static double g_xa1      = 0.0;   // accel end x
+static double g_off      = 0.0;   // accelerator aperture y-offset [m]
+static double g_scr_off  = 0.0;   // screen aperture y-offset [m]
 
 // screen chamfers (upstream & downstream)
 static double g_scr_du = 0.0, g_scr_mu = 0.0; // depth & slope upstream
@@ -196,7 +197,7 @@ static inline double accel_a_eff(double x) {
 
 // --------- solids: grids ----------
 static bool screen_fn(double x, double y, double /*z*/) {
-    if (x >= g_xs0 && x <= g_xs1) return (std::fabs(y) >= screen_a_eff(x));
+    if (x >= g_xs0 && x <= g_xs1) return (std::fabs(y - g_scr_off) >= screen_a_eff(x));
     return false;
 }
 static bool accel_fn(double x, double y, double /*z*/) {
@@ -242,6 +243,7 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
     const double x_right_phys = envd("X_RIGHT_PHYS_M", x_right);
     const bool truncated_drift = (x_right + 1.0e-12 < x_right_phys);
     const double off_y    = envd("ACCEL_OFF_Y_M", 0.0);
+    const double scr_off_y = envd("SCREEN_OFF_Y_M", envd("PG_OFF_Y_M", 0.0));
 
     // ----- electrical potentials -----
     const double VS_V     = envd("VS_V", 0.0);   // screen potential [V]
@@ -335,6 +337,7 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
     g_xs0 = xs0; g_xs1 = xs1;
     g_xa0 = xa0; g_xa1 = xa1;
     g_off = off_y;
+    g_scr_off = scr_off_y;
 
     g_scr_du = scr_du; g_scr_mu = scr_mu;
     g_scr_dd = scr_dd; g_scr_md = scr_md;
@@ -343,7 +346,8 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
 
     // Tube/endplate sizing
     const double max_delta = std::max({ scr_du*scr_mu, scr_dd*scr_md, acc_du*acc_mu, acc_dd*acc_md });
-    const double ybox_def  = std::max(3.0*(a + max_delta) + std::fabs(off_y), 5.0e-3);
+    const double off_abs   = std::max(std::fabs(off_y), std::fabs(scr_off_y));
+    const double ybox_def  = std::max(3.0*(a + max_delta) + off_abs, 5.0e-3);
     g_ybox = envd("YBOX_M", ybox_def);
 
     // Domain extents
@@ -437,6 +441,7 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
         m << "  \"GRID_T_M\":" << t << ",\n";
         m << "  \"GAP_M\":" << gap << ",\n";
         m << "  \"ACCEL_OFF_Y_M\":" << off_y << ",\n";
+        m << "  \"SCREEN_OFF_Y_M\":" << scr_off_y << ",\n";
         m << "  \"X_LEFT_M\":" << x_left << ",\n";
         m << "  \"X_RIGHT_M\":" << x_right << ",\n";
         m << "  \"X_RIGHT_PHYS_M\":" << x_right_phys << ",\n";
@@ -608,8 +613,8 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
 
             // Beam start line: just upstream of the screen aperture, across its open height
             const double x_emit = std::max(xmin + 2.0*h, xs0 - 2.0*h);
-            const double y_lo   = off_y - a;
-            const double y_hi   = off_y + a;
+            const double y_lo   = scr_off_y - a;
+            const double y_hi   = scr_off_y + a;
 
             // Injection energy: potential drop between plasma and accel side
             const double E0_ev  = std::max(1.0, std::fabs(PLASMA_UP_V - VA_V));
