@@ -54,6 +54,7 @@ X_RIGHT_M="${X_RIGHT_M:-0.06}"
 X_RIGHT_PHYS_M="${X_RIGHT_PHYS_M:-0.55}"
 YBOX_M=0.086
 ACCEL_OFF_Y_M=0.0
+SCREEN_OFF_Y_M=0.0
 
 # Potentials & downstream slices
 VS_V=0
@@ -123,6 +124,7 @@ DELTA_FLOORS_JSON="${DELTA_FLOORS_JSON:-$(
   "GAP_M":            2.0e-4,
   "GRID_T_M":         1.0e-3,
   "ACCEL_OFF_Y_M":    5.0e-4,
+  "SCREEN_OFF_Y_M":   5.0e-4,
   "SCR_UP_DEPTH_M":   5.0e-4,
   "SCR_DN_DEPTH_M":   5.0e-4,
   "ACC_UP_DEPTH_M":   5.0e-4,
@@ -216,6 +218,7 @@ export X_RIGHT_M=__X_RIGHT_M__
 export X_RIGHT_PHYS_M=__X_RIGHT_PHYS_M__
 export YBOX_M=__YBOX_M__
 export ACCEL_OFF_Y_M=__ACCEL_OFF_Y_M__
+export SCREEN_OFF_Y_M=__SCREEN_OFF_Y_M__
 
 export VS_V=__VS_V__
 export VA_V=__VA_V__
@@ -266,6 +269,7 @@ E_XR="$(sed_escape "$X_RIGHT_M")"
 E_XRP="$(sed_escape "$X_RIGHT_PHYS_M")"
 E_YB="$(sed_escape "$YBOX_M")"
 E_OFF="$(sed_escape "$ACCEL_OFF_Y_M")"
+E_SOFF="$(sed_escape "$SCREEN_OFF_Y_M")"
 E_VS="$(sed_escape "$VS_V")"
 E_VA="$(sed_escape "$VA_V")"
 E_SAMP="$(sed_escape "$SAMPLE_V")"
@@ -309,6 +313,7 @@ sed -i \
   -e "s#__X_RIGHT_PHYS_M__#${E_XRP}#" \
   -e "s#__YBOX_M__#${E_YB}#" \
   -e "s#__ACCEL_OFF_Y_M__#${E_OFF}#" \
+  -e "s#__SCREEN_OFF_Y_M__#${E_SOFF}#" \
   -e "s#__VS_V__#${E_VS}#" \
   -e "s#__VA_V__#${E_VA}#" \
   -e "s#__SAMPLE_V__#${E_SAMP}#" \
@@ -497,7 +502,7 @@ def extract_geom(meta):
     scr=meta.get("screen_chamfer") or {}
     acc=meta.get("accel_chamfer") or {}
     out.update({k:meta.get(k) for k in [
-        "AP_RAD_M","GRID_T_M","GAP_M","ACCEL_OFF_Y_M","H","X_LEFT_M","X_RIGHT_M","YBOX_M",
+        "AP_RAD_M","GRID_T_M","GAP_M","ACCEL_OFF_Y_M","SCREEN_OFF_Y_M","H","X_LEFT_M","X_RIGHT_M","YBOX_M",
         "VS_V","VA_V","SAMPLE_V"
     ] if k in meta})
     out.update({
@@ -530,7 +535,7 @@ def collect_rows(root: Path):
         acc = (m.get("accel_chamfer") or {})
         feat = {
           "AP_RAD_M": m.get("AP_RAD_M"), "GRID_T_M": m.get("GRID_T_M"),
-          "GAP_M": m.get("GAP_M"), "ACCEL_OFF_Y_M": m.get("ACCEL_OFF_Y_M"),
+          "GAP_M": m.get("GAP_M"), "ACCEL_OFF_Y_M": m.get("ACCEL_OFF_Y_M"), "SCREEN_OFF_Y_M": m.get("SCREEN_OFF_Y_M"),
           "SCR_UP_DEPTH_M": scr.get("up_depth"), "SCR_UP_ANGLE_DEG": scr.get("up_angle_deg"),
           "SCR_DN_DEPTH_M": scr.get("dn_depth"), "SCR_DN_ANGLE_DEG": scr.get("dn_angle_deg"),
           "ACC_UP_DEPTH_M": acc.get("up_depth"), "ACC_UP_ANGLE_DEG": acc.get("up_angle_deg"),
@@ -1174,7 +1179,7 @@ IFS=',' read -r -a KNOBS <<< "${OPT_KNOBS:-}"
 for K in "${KNOBS[@]}"; do
   K=$(echo "$K" | xargs)
   case "$K" in
-    AP_RAD_M|GAP_M|GRID_T_M|ACCEL_OFF_Y_M|SCR_UP_DEPTH_M|SCR_DN_DEPTH_M|ACC_UP_DEPTH_M|ACC_DN_DEPTH_M|SCR_UP_ANGLE_DEG|SCR_DN_ANGLE_DEG|ACC_UP_ANGLE_DEG|ACC_DN_ANGLE_DEG)
+    AP_RAD_M|GAP_M|GRID_T_M|ACCEL_OFF_Y_M|SCREEN_OFF_Y_M|SCR_UP_DEPTH_M|SCR_DN_DEPTH_M|ACC_UP_DEPTH_M|ACC_DN_DEPTH_M|SCR_UP_ANGLE_DEG|SCR_DN_ANGLE_DEG|ACC_UP_ANGLE_DEG|ACC_DN_ANGLE_DEG)
       add_list "$K" "${!K}"
       ;;
     *) echo "[refine] WARNING: unknown knob '$K' ignored";;
@@ -1183,6 +1188,7 @@ done
 
 # Base env for two_grid_2d
 export H="__H__" X_LEFT_M="__X_LEFT_M__" X_RIGHT_M="__X_RIGHT_M__" YBOX_M="__YBOX_M__"
+export ACCEL_OFF_Y_M="__ACCEL_OFF_Y_M__" SCREEN_OFF_Y_M="__SCREEN_OFF_Y_M__"
 export X_RIGHT_PHYS_M="__X_RIGHT_PHYS_M__"
 export VS_V="__VS_V__" VA_V="__VA_V__" SAMPLE_V="__SAMPLE_V__"
 export TUBE_WALL_T_M="__TUBE_WALL_T_M__" SAMPLE_PLATE_T_M="__SAMPLE_PLATE_T_M__"
@@ -1244,6 +1250,7 @@ EOF_REF2
 fill_ref2() { sed -i -e "s#__$1__#$(sed_escape "$2")#" "$PIPE_ROOT/refine_stage2.slurm"; }
 fill_ref2 RESULTS_DIR "$RESULTS_DIR"
 fill_ref2 H "$H";               fill_ref2 X_LEFT_M "$X_LEFT_M";  fill_ref2 X_RIGHT_M "$X_RIGHT_M"; fill_ref2 YBOX_M "$YBOX_M"
+fill_ref2 ACCEL_OFF_Y_M "$ACCEL_OFF_Y_M"; fill_ref2 SCREEN_OFF_Y_M "$SCREEN_OFF_Y_M"
 fill_ref2 X_RIGHT_PHYS_M "$X_RIGHT_PHYS_M"
 fill_ref2 VS_V "$VS_V";         fill_ref2 VA_V "$VA_V";          fill_ref2 SAMPLE_V "$SAMPLE_V"
 fill_ref2 TUBE_WALL_T_M "$TUBE_WALL_T_M"; fill_ref2 SAMPLE_PLATE_T_M "$SAMPLE_PLATE_T_M"
@@ -1307,5 +1314,3 @@ fi
 
 echo "[orchestrator] Submitted. Monitor:"
 echo "  squeue -u $USER -o \"%.10i %.5t %12j %8A %8a %20S\""
-
-
