@@ -65,7 +65,7 @@ IDENTITY_COLS = [
 
 ASSIGNED_COLS = [
     "VS_V","VA_V","SAMPLE_V",
-    "H","AP_RAD_M","GRID_T_M","GAP_M","ACCEL_OFF_Y_M",
+    "H","AP_RAD_M","GRID_T_M","GAP_M","ACCEL_OFF_Y_M","SCREEN_OFF_Y_M",
     "X_LEFT_M","X_RIGHT_M","X_RIGHT_PHYS_M","TRUNCATED_DRIFT","YBOX_M",
     "TUBE_X_START_M","TUBE_X_END_M","TUBE_WALL_T_M","SAMPLE_PLATE_T_M",
     "SCR_UP_DEPTH_M","SCR_UP_ANGLE_DEG","SCR_DN_DEPTH_M","SCR_DN_ANGLE_DEG",
@@ -89,8 +89,12 @@ OUTPUT_COLS = [
     "Y_RMS_SAMPLE_M",
     "Y_ABSMAX_SAMPLE_M",
     "FOOTPRINT_PRED_M",
+    "FOOTPRINT_PRED_400MM_M",
+    "FOOTPRINT_PRED_500MM_M",
+    "FOOTPRINT_PRED_600MM_M",
     "CLEARANCE_PRED_M",
     "HITS_TUBE_PRED",
+    "DIVERGENCE_ANGLE_DEG",
     "P_CL_A_PER_V32",
     "P_GEOM_AG_A_PER_V32",
     "P_NORM_AG_OVER_CL",
@@ -113,7 +117,7 @@ def extract_row(run_dir: Path, results_dir: Path) -> Dict[str, Any]:
     row["RUN_TAG"]   = meta.get("RUN_TAG")
     row["RUN_STAMP"] = meta.get("RUN_STAMP")
 
-    for k in ["VS_V","VA_V","SAMPLE_V","H","AP_RAD_M","GRID_T_M","GAP_M","ACCEL_OFF_Y_M",
+    for k in ["VS_V","VA_V","SAMPLE_V","H","AP_RAD_M","GRID_T_M","GAP_M","ACCEL_OFF_Y_M","SCREEN_OFF_Y_M",
               "X_LEFT_M","X_RIGHT_M","X_RIGHT_PHYS_M","TRUNCATED_DRIFT","YBOX_M"]:
         if k in meta:
             row[k] = meta.get(k)
@@ -123,7 +127,7 @@ def extract_row(run_dir: Path, results_dir: Path) -> Dict[str, Any]:
     row["TUBE_X_END_M"]   = tube.get("x_end")
     row["TUBE_WALL_T_M"]  = tube.get("wall_t")
     row["SAMPLE_PLATE_T_M"]= tube.get("endplate_t")
-
+    
     scr = meta.get("screen_chamfer") or {}
     acc = meta.get("accel_chamfer") or {}
     row["SCR_UP_DEPTH_M"]   = scr.get("up_depth")
@@ -165,8 +169,12 @@ def extract_row(run_dir: Path, results_dir: Path) -> Dict[str, Any]:
     # optional predicted footprint fields (filled only if your run writes them)
     for out_key, paths in [
         ("FOOTPRINT_PRED_M", ["envelope.footprint_pred_m", "envelope.footprint_m", "FOOTPRINT_PRED_M"]),
+        ("FOOTPRINT_PRED_400MM_M", ["envelope.footprint_pred_400mm_m", "FOOTPRINT_PRED_400MM_M"]),
+        ("FOOTPRINT_PRED_500MM_M", ["envelope.footprint_pred_500mm_m", "FOOTPRINT_PRED_500MM_M"]),
+        ("FOOTPRINT_PRED_600MM_M", ["envelope.footprint_pred_600mm_m", "FOOTPRINT_PRED_600MM_M"]),
         ("CLEARANCE_PRED_M", ["envelope.clearance_pred_m", "CLEARANCE_PRED_M"]),
         ("HITS_TUBE_PRED",   ["envelope.hits_tube_pred", "HITS_TUBE_PRED"]),
+        ("DIVERGENCE_ANGLE_DEG", ["envelope.divergence_angle_deg", "DIVERGENCE_ANGLE_DEG"]),
     ]:
         val = None
         for p in paths:
