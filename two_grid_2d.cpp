@@ -792,8 +792,22 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             double x_hit_pred_m     = std::numeric_limits<double>::quiet_NaN();
             double max_abs_pred_m   = std::numeric_limits<double>::quiet_NaN();
             int    hits_tube_pred   = 0;
+            double div_angle_deg    = std::numeric_limits<double>::quiet_NaN();
+
+            double footprint_pred_400mm_m = std::numeric_limits<double>::quiet_NaN();
+            double footprint_pred_500mm_m = std::numeric_limits<double>::quiet_NaN();
+            double footprint_pred_600mm_m = std::numeric_limits<double>::quiet_NaN();
 
             const double x_phys_end = xmax_phys - g_end_w - 0.5*h; // approx "sample plane" of the full-length geometry
+            const double x_targets[3] = { x_ag_plane + 0.4, x_ag_plane + 0.5, x_ag_plane + 0.6 };
+            double r_targets[3] = {
+                std::numeric_limits<double>::quiet_NaN(),
+                std::numeric_limits<double>::quiet_NaN(),
+                std::numeric_limits<double>::quiet_NaN()
+            };
+            bool got_targets[3] = { false, false, false };
+            double r_end = std::numeric_limits<double>::quiet_NaN();
+            bool got_phys_end = false;
 
             // Minimal JSON string escaper for diagnostics.
             auto json_q = []( const std::string &s ) -> std::string {
@@ -845,6 +859,13 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                         const double rp0  = (r1 - r0) / dx_probe;
                         const double rpp0 = (r2 - 2.0*r1 + r0) / (dx_probe*dx_probe);
 
+                        // Average divergence angle from RMS growth rate.
+                        const double rp_avg = (r2 - r0) / (2.0*dx_probe);
+                        if (std::isfinite(rp_avg)) {
+                            const double rp_use = std::max(0.0, rp_avg);
+                            div_angle_deg = rad2deg(std::atan(rp_use));
+                        }
+
                         double K_eff = r0 * rpp0;
                         if( !std::isfinite(K_eff) ) K_eff = 0.0;
                         if( K_eff < 0.0 ) K_eff = 0.0; // clamp: we only model divergence here
@@ -864,8 +885,11 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                         max_abs_pred_m = abs_ratio * r;
                         hits_tube_pred = 0;
 
-                        while( x < x_phys_end ) {
-                            const double step = std::min(dx_env, x_phys_end - x);
+                        const double x_max_target = std::max(x_phys_end,
+                            std::max(x_targets[0], std::max(x_targets[1], x_targets[2])));
+
+                        while( x < x_max_target ) {
+                            const double step = std::min(dx_env, x_max_target - x);
                             const double rpp  = (r > 1.0e-12) ? (K_eff / r) : 0.0;
 
                             rp += rpp * step;
@@ -877,18 +901,40 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                                 break;
                             }
 
-                            const double abs_now = abs_ratio * r;
-                            if( abs_now > max_abs_pred_m ) max_abs_pred_m = abs_now;
-                            if( !hits_tube_pred && abs_now >= tube_inner ) {
-                                hits_tube_pred = 1;
-                                x_hit_pred_m   = x;
+                            if (x <= x_phys_end + 1.0e-12) {
+                                const double abs_now = abs_ratio * r;
+                                if( abs_now > max_abs_pred_m ) max_abs_pred_m = abs_now;
+                                if( !hits_tube_pred && abs_now >= tube_inner ) {
+                                    hits_tube_pred = 1;
+                                    x_hit_pred_m   = x;
+                                }
+                            }
+                            if (!got_phys_end && x >= x_phys_end) {
+                                got_phys_end = true;
+                                r_end = r;
+                            }
+                            for (int ti = 0; ti < 3; ++ti) {
+                                if (!got_targets[ti] && x >= x_targets[ti]) {
+                                    got_targets[ti] = true;
+                                    r_targets[ti] = r;
+                                }
                             }
                         }
 
                         if( env_reason.empty() ) {
-                            footprint_pred_m = abs_ratio * r;
-                            clearance_pred_m = tube_inner - footprint_pred_m;
-                            env_ok = std::isfinite(footprint_pred_m);
+                            if (got_phys_end && std::isfinite(r_end)) {
+                                footprint_pred_m = abs_ratio * r_end;
+                                clearance_pred_m = tube_inner - footprint_pred_m;
+                                env_ok = std::isfinite(footprint_pred_m);
+                            } else {
+                                env_reason = "missing envelope at physical end";
+                            }
+                            if (got_targets[0] && std::isfinite(r_targets[0]))
+                                footprint_pred_400mm_m = abs_ratio * r_targets[0];
+                            if (got_targets[1] && std::isfinite(r_targets[1]))
+                                footprint_pred_500mm_m = abs_ratio * r_targets[1];
+                            if (got_targets[2] && std::isfinite(r_targets[2]))
+                                footprint_pred_600mm_m = abs_ratio * r_targets[2];
                         }
                     }
                 }
@@ -915,8 +961,20 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                 ej << "  \"footprint_pred_m\": ";
                 if( env_ok && std::isfinite(footprint_pred_m) ) ej << std::setprecision(10) << footprint_pred_m; else ej << "null";
                 ej << ",\n";
+                ej << "  \"footprint_pred_400mm_m\": ";
+                if( env_ok && std::isfinite(footprint_pred_400mm_m) ) ej << std::setprecision(10) << footprint_pred_400mm_m; else ej << "null";
+                ej << ",\n";
+                ej << "  \"footprint_pred_500mm_m\": ";
+                if( env_ok && std::isfinite(footprint_pred_500mm_m) ) ej << std::setprecision(10) << footprint_pred_500mm_m; else ej << "null";
+                ej << ",\n";
+                ej << "  \"footprint_pred_600mm_m\": ";
+                if( env_ok && std::isfinite(footprint_pred_600mm_m) ) ej << std::setprecision(10) << footprint_pred_600mm_m; else ej << "null";
+                ej << ",\n";
                 ej << "  \"clearance_pred_m\": ";
                 if( env_ok && std::isfinite(clearance_pred_m) ) ej << std::setprecision(10) << clearance_pred_m; else ej << "null";
+                ej << ",\n";
+                ej << "  \"divergence_angle_deg\": ";
+                if( std::isfinite(div_angle_deg) ) ej << std::setprecision(10) << div_angle_deg; else ej << "null";
                 ej << ",\n";
                 ej << "  \"max_abs_pred_m\": ";
                 if( env_ok && std::isfinite(max_abs_pred_m) ) ej << std::setprecision(10) << max_abs_pred_m; else ej << "null";
@@ -944,6 +1002,15 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                 mj << "  \"FOOTPRINT_PRED_M\": ";
                 if( env_ok && std::isfinite(footprint_pred_m) ) mj << std::setprecision(10) << footprint_pred_m; else mj << "null";
                 mj << ",\n";
+                mj << "  \"FOOTPRINT_PRED_400MM_M\": ";
+                if( env_ok && std::isfinite(footprint_pred_400mm_m) ) mj << std::setprecision(10) << footprint_pred_400mm_m; else mj << "null";
+                mj << ",\n";
+                mj << "  \"FOOTPRINT_PRED_500MM_M\": ";
+                if( env_ok && std::isfinite(footprint_pred_500mm_m) ) mj << std::setprecision(10) << footprint_pred_500mm_m; else mj << "null";
+                mj << ",\n";
+                mj << "  \"FOOTPRINT_PRED_600MM_M\": ";
+                if( env_ok && std::isfinite(footprint_pred_600mm_m) ) mj << std::setprecision(10) << footprint_pred_600mm_m; else mj << "null";
+                mj << ",\n";
                 mj << "  \"CLEARANCE_PRED_M\": ";
                 if( env_ok && std::isfinite(clearance_pred_m) ) mj << std::setprecision(10) << clearance_pred_m; else mj << "null";
                 mj << ",\n";
@@ -952,6 +1019,9 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                 mj << ",\n";
                 mj << "  \"X_HIT_PRED_M\": ";
                 if( env_ok && std::isfinite(x_hit_pred_m) ) mj << std::setprecision(10) << x_hit_pred_m; else mj << "null";
+                mj << ",\n";
+                mj << "  \"DIVERGENCE_ANGLE_DEG\": ";
+                if( std::isfinite(div_angle_deg) ) mj << std::setprecision(10) << div_angle_deg; else mj << "null";
                 mj << ",\n";
                 mj << "  \"sample\": {\n";
                 mj << "    \"I_Apm\": "      << std::setprecision(10) << I_sm_Apm  << ",\n";
@@ -1091,11 +1161,14 @@ const double P_sys_norm_sm = P_sys_norm_ag;
             double x0 = xs0 - pad;
             double x1 = xa1 + pad;
 
-            // account for offset + chamfer widening
+            // account for offset + chamfer widening (centered between screen/accel offsets)
             double max_delta2 = std::max({ g_scr_du*g_scr_mu, g_scr_dd*g_scr_md,
                                            g_acc_du*g_acc_mu, g_acc_dd*g_acc_md });
-            double ymax_local = std::max(a, std::fabs(off_y) + a + max_delta2) + pad;
-            double y0 = -ymax_local, y1 = ymax_local;
+            const double y_center = 0.5 * (scr_off_y + off_y);
+            const double y_span = std::max(std::fabs(scr_off_y - y_center),
+                                           std::fabs(off_y - y_center));
+            double ymax_local = y_span + a + max_delta2 + pad;
+            double y0 = y_center - ymax_local, y1 = y_center + ymax_local;
 
             // aspect-preserving size: 800 px tall, width scaled by xr/yr
             const int   BASE = envi("CLOSE_BASE_PX", 800);
@@ -1140,8 +1213,11 @@ const double P_sys_norm_sm = P_sys_norm_ag;
         double x1 = xa1 + pad;
         double max_delta = std::max({ g_scr_du*g_scr_mu, g_scr_dd*g_scr_md,
                                       g_acc_du*g_acc_mu, g_acc_dd*g_acc_md });
-        double ymax_local = std::max(a, std::fabs(off_y) + a + max_delta) + pad;
-        double y0 = -ymax_local, y1 = ymax_local;
+        const double y_center = 0.5 * (scr_off_y + off_y);
+        const double y_span = std::max(std::fabs(scr_off_y - y_center),
+                                       std::fabs(off_y - y_center));
+        double ymax_local = y_span + a + max_delta + pad;
+        double y0 = y_center - ymax_local, y1 = y_center + ymax_local;
 
         const int   BASE = envi("CLOSE_BASE_PX", 800);
         const double xr = x1 - x0, yr = y1 - y0;
