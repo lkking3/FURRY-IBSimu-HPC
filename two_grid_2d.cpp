@@ -45,6 +45,7 @@ static int envi(const char* k, int vdef) {
     return vdef;
 }
 static inline double deg2rad(double deg){ return deg * (M_PI/180.0); }
+static inline double rad2deg(double r){ return r * (180.0/M_PI); }
 
 // v^(3/2) helper (avoids pow for speed + stability)
 static inline double pow32(double v) { return (v > 0.0) ? (v * std::sqrt(v)) : 0.0; }
