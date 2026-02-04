@@ -677,7 +677,9 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
 
             auto current_and_width_at_plane = [&](double xpos,
                                                 double &Itot,
-                                                double &y_rms,
+                                                double &y_mean,
+                                                double &y_rms0,
+                                                double &y_rms_c,
                                                 double &y_absmax) {
                 TrajectoryDiagnosticData tdata;
                 std::vector<trajectory_diagnostic_e> diag;
@@ -691,24 +693,35 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                 const std::vector<double> &curr = tdata(1).data();
 
                 Itot     = 0.0;
-                y_rms    = 0.0;
+                y_mean   = 0.0;
+                y_rms0   = 0.0;
+                y_rms_c  = 0.0;
                 y_absmax = 0.0;
 
                 const size_t N = curr.size();
+                double sum_wy = 0.0;
+                double sum_wy2 = 0.0;
                 for (size_t i = 0; i < N; ++i) {
                     const double w  = curr[i];      // current weight (A/m in 2D)
                     const double yy = y[i];
                     const double ay = std::fabs(yy);
 
-                    Itot  += w;
-                    y_rms += w * yy * yy;
+                    Itot   += w;
+                    sum_wy += w * yy;
+                    sum_wy2 += w * yy * yy;
                     if (ay > y_absmax) y_absmax = ay;
                 }
 
-                if (Itot > 0.0)
-                    y_rms = std::sqrt(y_rms / Itot);
-                else
-                    y_rms = 0.0;
+                if (Itot > 0.0) {
+                    y_mean = sum_wy / Itot;
+                    y_rms0 = std::sqrt(sum_wy2 / Itot);
+                    const double var = (sum_wy2 / Itot) - (y_mean * y_mean);
+                    y_rms_c = (var > 0.0) ? std::sqrt(var) : 0.0;
+                } else {
+                    y_mean = 0.0;
+                    y_rms0 = 0.0;
+                    y_rms_c = 0.0;
+                }
             };
 
             // ---- 2.1 Currents at PG entrance, AG exit, sample wall ----
@@ -723,15 +736,15 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             const double x_sm_plane = endplate_enabled ? (g_tube_x1 - g_end_w - 0.5*h)
                                                      : std::numeric_limits<double>::quiet_NaN();
 
-            double I_pg_in_Apm  = 0.0, yr_pg  = 0.0, ymax_pg  = 0.0;
-            double I_ag_out_Apm = 0.0, yr_ag  = 0.0, ymax_ag  = 0.0;
-            double I_sm_Apm     = 0.0, yr_sm  = 0.0, ymax_sm  = 0.0;
+            double I_pg_in_Apm  = 0.0, ymean_pg = 0.0, yr_pg  = 0.0, yr_pg_c  = 0.0, ymax_pg  = 0.0;
+            double I_ag_out_Apm = 0.0, ymean_ag = 0.0, yr_ag  = 0.0, yr_ag_c  = 0.0, ymax_ag  = 0.0;
+            double I_sm_Apm     = 0.0, ymean_sm = 0.0, yr_sm  = 0.0, yr_sm_c  = 0.0, ymax_sm  = 0.0;
 
-            current_and_width_at_plane(x_pg_plane, I_pg_in_Apm,  yr_pg,  ymax_pg);
-            current_and_width_at_plane(x_ag_plane, I_ag_out_Apm, yr_ag,  ymax_ag);
+            current_and_width_at_plane(x_pg_plane, I_pg_in_Apm,  ymean_pg,  yr_pg,  yr_pg_c,  ymax_pg);
+            current_and_width_at_plane(x_ag_plane, I_ag_out_Apm, ymean_ag, yr_ag,  yr_ag_c,  ymax_ag);
             if (endplate_enabled) {
 
-                current_and_width_at_plane(x_sm_plane, I_sm_Apm, yr_sm, ymax_sm);
+                current_and_width_at_plane(x_sm_plane, I_sm_Apm, ymean_sm, yr_sm, yr_sm_c, ymax_sm);
 
             }
             // 3D estimates in amps using Leff
@@ -747,6 +760,33 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                         I_ag_out_Apm, I_ag_out_A,
                         I_sm_Apm,     I_sm_A);
 
+            // Deflection (centroid steering) between AG exit and right boundary of computed space.
+            const double x_right_plane = endplate_enabled
+                                             ? (g_tube_x1 - g_end_w - 0.5*h)
+                                             : (xmax - 0.5*h);
+            double I_right_Apm = 0.0, ymean_right = 0.0, yr_right = 0.0, yr_right_c = 0.0, ymax_right = 0.0;
+            bool have_right_plane = false;
+            if (x_right_plane > x_ag_plane + 2.0*h) {
+                current_and_width_at_plane(x_right_plane, I_right_Apm, ymean_right, yr_right, yr_right_c, ymax_right);
+                have_right_plane = (I_right_Apm > 0.0);
+            }
+
+            double steer_angle_deg = std::numeric_limits<double>::quiet_NaN();
+            double y_mean_pred_400mm_m = std::numeric_limits<double>::quiet_NaN();
+            double y_mean_pred_500mm_m = std::numeric_limits<double>::quiet_NaN();
+            double y_mean_pred_600mm_m = std::numeric_limits<double>::quiet_NaN();
+
+            if (have_right_plane && I_ag_out_Apm > 0.0) {
+                const double dx = x_right_plane - x_ag_plane;
+                if (dx > 0.0) {
+                    const double slope = (ymean_right - ymean_ag) / dx;
+                    steer_angle_deg = rad2deg(std::atan(slope));
+                    y_mean_pred_400mm_m = ymean_ag + slope * 0.4;
+                    y_mean_pred_500mm_m = ymean_ag + slope * 0.5;
+                    y_mean_pred_600mm_m = ymean_ag + slope * 0.6;
+                }
+            }
+
             // ---- 2.2 Collimation scan between AG exit and sample ----
 
             const int    Nplanes    = envi("BEAM_COL_NPLANES", 32);
@@ -756,6 +796,7 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             const double tube_inner = g_ybox - g_tube_w;  // half-height of free tube aperture
 
             double y_rms_max    = 0.0;
+            double y_rms_c_max  = 0.0;
             double y_absmax_max = 0.0;
             bool   lost_sidewalls = false;
 
@@ -763,13 +804,14 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                 const double s  = (Nplanes > 1) ? double(ip) / double(Nplanes - 1) : 0.0;
                 const double xp = x_start + s * (x_end - x_start);
 
-                double I_plane = 0.0, yr = 0.0, ymax = 0.0;
-                current_and_width_at_plane(xp, I_plane, yr, ymax);
+                double I_plane = 0.0, ymean = 0.0, yr = 0.0, yr_c = 0.0, ymax = 0.0;
+                current_and_width_at_plane(xp, I_plane, ymean, yr, yr_c, ymax);
 
                 if (I_plane <= 0.0)
                     continue;  // no trajectories crossing here
 
                 if (yr > y_rms_max)      y_rms_max    = yr;
+                if (yr_c > y_rms_c_max)  y_rms_c_max  = yr_c;
                 if (ymax > y_absmax_max) y_absmax_max = ymax;
 
                 // If any significant current reaches near the tube inner radius, flag it.
@@ -845,13 +887,13 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                     const double x1 = x0 + dx_probe;
                     const double x2 = x1 + dx_probe;
 
-                    double I0_Apm=0.0, r0=0.0, a0=0.0;
-                    double I1_Apm=0.0, r1=0.0, a1=0.0;
-                    double I2_Apm=0.0, r2=0.0, a2=0.0;
+                    double I0_Apm=0.0, y0_mean=0.0, r0=0.0, r0c=0.0, a0=0.0;
+                    double I1_Apm=0.0, y1_mean=0.0, r1=0.0, r1c=0.0, a1=0.0;
+                    double I2_Apm=0.0, y2_mean=0.0, r2=0.0, r2c=0.0, a2=0.0;
 
-                    current_and_width_at_plane(x0, I0_Apm, r0, a0);
-                    current_and_width_at_plane(x1, I1_Apm, r1, a1);
-                    current_and_width_at_plane(x2, I2_Apm, r2, a2);
+                    current_and_width_at_plane(x0, I0_Apm, y0_mean, r0, r0c, a0);
+                    current_and_width_at_plane(x1, I1_Apm, y1_mean, r1, r1c, a1);
+                    current_and_width_at_plane(x2, I2_Apm, y2_mean, r2, r2c, a2);
 
                     if( I0_Apm <= 0.0 || r0 <= 0.0 ||
                         !std::isfinite(r0) || !std::isfinite(r1) || !std::isfinite(r2) ) {
@@ -860,8 +902,8 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                         const double rp0  = (r1 - r0) / dx_probe;
                         const double rpp0 = (r2 - 2.0*r1 + r0) / (dx_probe*dx_probe);
 
-                        // Average divergence angle from RMS growth rate.
-                        const double rp_avg = (r2 - r0) / (2.0*dx_probe);
+                        // Average divergence angle from *centered* RMS growth rate.
+                        const double rp_avg = (r2c - r0c) / (2.0*dx_probe);
                         if (std::isfinite(rp_avg)) {
                             const double rp_use = std::max(0.0, rp_avg);
                             div_angle_deg = rad2deg(std::atan(rp_use));
@@ -1038,11 +1080,33 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                 mj << "  },\n";
                 mj << "  \"collimation\": {\n";
                 mj << "    \"y_rms_max_m\": "      << std::setprecision(10) << y_rms_max    << ",\n";
+                mj << "    \"y_rms_c_max_m\": "    << std::setprecision(10) << y_rms_c_max  << ",\n";
                 mj << "    \"y_absmax_max_m\": "   << std::setprecision(10) << y_absmax_max << ",\n";
                 mj << "    \"tube_inner_half_m\": " << std::setprecision(10) << tube_inner   << ",\n";
                 mj << "    \"lost_to_sidewalls\": " << (lost_sidewalls   ? "true" : "false") << ",\n";
                 mj << "    \"good_single_beam\": "  << (good_single_beam ? "true" : "false") << ",\n";
                 mj << "    \"has_sample_beam\": "   << (has_sample_beam  ? "true" : "false") << "\n";
+                mj << "  }\n";
+                mj << ",\n";
+                mj << "  \"deflection\": {\n";
+                mj << "    \"x_ag_plane_m\": " << std::setprecision(10) << x_ag_plane << ",\n";
+                mj << "    \"x_right_plane_m\": " << std::setprecision(10) << x_right_plane << ",\n";
+                mj << "    \"y_mean_ag_m\": " << std::setprecision(10) << ymean_ag << ",\n";
+                mj << "    \"y_mean_right_m\": " << std::setprecision(10) << ymean_right << ",\n";
+                mj << "    \"y_rms_c_ag_m\": " << std::setprecision(10) << yr_ag_c << ",\n";
+                mj << "    \"y_rms_c_right_m\": " << std::setprecision(10) << yr_right_c << ",\n";
+                mj << "    \"steer_angle_deg\": ";
+                if (std::isfinite(steer_angle_deg)) mj << std::setprecision(10) << steer_angle_deg; else mj << "null";
+                mj << ",\n";
+                mj << "    \"y_mean_pred_400mm_m\": ";
+                if (std::isfinite(y_mean_pred_400mm_m)) mj << std::setprecision(10) << y_mean_pred_400mm_m; else mj << "null";
+                mj << ",\n";
+                mj << "    \"y_mean_pred_500mm_m\": ";
+                if (std::isfinite(y_mean_pred_500mm_m)) mj << std::setprecision(10) << y_mean_pred_500mm_m; else mj << "null";
+                mj << ",\n";
+                mj << "    \"y_mean_pred_600mm_m\": ";
+                if (std::isfinite(y_mean_pred_600mm_m)) mj << std::setprecision(10) << y_mean_pred_600mm_m; else mj << "null";
+                mj << "\n";
                 mj << "  }\n";
                 // Perveance numbers (geometric from simulated current, plus CL reference and normalized perveance)
 //
