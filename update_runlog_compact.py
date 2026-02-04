@@ -95,6 +95,15 @@ OUTPUT_COLS = [
     "CLEARANCE_PRED_M",
     "HITS_TUBE_PRED",
     "DIVERGENCE_ANGLE_DEG",
+    "STEER_ANGLE_DEG",
+    "Y_MEAN_AG_M",
+    "Y_MEAN_RIGHT_M",
+    "Y_MEAN_PRED_400MM_M",
+    "Y_MEAN_PRED_500MM_M",
+    "Y_MEAN_PRED_600MM_M",
+    "Y_RMS_C_AG_M",
+    "Y_RMS_C_RIGHT_M",
+    "Y_RMS_C_MAX_M",
     "P_CL_A_PER_V32",
     "P_GEOM_AG_A_PER_V32",
     "P_NORM_AG_OVER_CL",
@@ -165,6 +174,7 @@ def extract_row(run_dir: Path, results_dir: Path) -> Dict[str, Any]:
     row["TUBE_INNER_HALF_M"] = coll.get("tube_inner_half_m")
     row["Y_RMS_SAMPLE_M"]    = sm.get("y_rms_m")
     row["Y_ABSMAX_SAMPLE_M"] = sm.get("y_absmax_m")
+    row["Y_RMS_C_MAX_M"]     = coll.get("y_rms_c_max_m")
 
     # optional predicted footprint fields (filled only if your run writes them)
     for out_key, paths in [
@@ -184,6 +194,16 @@ def extract_row(run_dir: Path, results_dir: Path) -> Dict[str, Any]:
             if val is not None:
                 break
         row[out_key] = val
+
+    defl = bm.get("deflection") or {}
+    row["STEER_ANGLE_DEG"] = defl.get("steer_angle_deg")
+    row["Y_MEAN_AG_M"] = defl.get("y_mean_ag_m")
+    row["Y_MEAN_RIGHT_M"] = defl.get("y_mean_right_m")
+    row["Y_MEAN_PRED_400MM_M"] = defl.get("y_mean_pred_400mm_m")
+    row["Y_MEAN_PRED_500MM_M"] = defl.get("y_mean_pred_500mm_m")
+    row["Y_MEAN_PRED_600MM_M"] = defl.get("y_mean_pred_600mm_m")
+    row["Y_RMS_C_AG_M"] = defl.get("y_rms_c_ag_m")
+    row["Y_RMS_C_RIGHT_M"] = defl.get("y_rms_c_right_m")
 
     pv = bm.get("perveance") or {}
     beamlet = (pv.get("beamlet") or {})
