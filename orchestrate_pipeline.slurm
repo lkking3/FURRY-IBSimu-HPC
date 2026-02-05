@@ -36,7 +36,7 @@ ARRAY_CONC=5
 
 # Results root & run name prefix
 RESULTS_DIR="${RESULTS_DIR:-$PWD/results}"
-RUN_PREFIX="two_grid_SC_Ramp_Rework_Test"
+RUN_PREFIX="two_grid_Convergence_Study_Idealized_Grid_offset"
 
 # ---- Stage-1 verticality sampling knobs (passed to compute jobs) ----
 TRACE_ENABLE=0            # 0=metrics only; 1=also write CSV tracers
@@ -56,6 +56,11 @@ YBOX_M=0.086
 ACCEL_OFF_Y_M=0.0
 SCREEN_OFF_Y_M=0.0
 
+# Offset sweep controls (defaults = single value at the base offsets)
+ACCEL_OFF_START_M="${ACCEL_OFF_START_M:-$ACCEL_OFF_Y_M}"
+ACCEL_OFF_STEP_M="${ACCEL_OFF_STEP_M:-0.0}"
+ACCEL_OFF_COUNT="${ACCEL_OFF_COUNT:-1}"
+
 # Potentials & downstream slices
 VS_V=0
 VA_V=-10000
@@ -74,7 +79,7 @@ PLOT_FONT_PX=${PLOT_FONT_PX:-22}
 # Stage 1: field-only (fast) by default
 # Stage 2: enable ions manually or by setting this to 1
 ENABLE_IONS_STAGE1=${ENABLE_IONS_STAGE1:-1}
-ENABLE_IONS_STAGE2=${ENABLE_IONS_STAGE2:-0}   # set to 1 when you want Stage-2 with ions
+ENABLE_IONS_STAGE2=${ENABLE_IONS_STAGE2:-1}   # set to 1 when you want Stage-2 with ions
 
 # Plasma defaults (match C++ defaults; you can override here or via sbatch --export)
 PLASMA_NI_M3=${PLASMA_NI_M3:-2e18}
@@ -88,9 +93,9 @@ SC_FACTOR=${SC_FACTOR:-0.1} # 1.0 = full space charge, <1.0 = partially neutrali
 # SWEEP LISTS
 # =====================================================================================
 # Geometry
-AP_RAD_LIST=(0.001 0.0015 0.002 0.0025 0.003 0.0035 0.004)                # 0.001 0.0015 0.002 0.0025 0.003 0.0035 0.004 0.0045 0.005)
+AP_RAD_LIST=(0.0015)               # 0.001 0.0015 0.002 0.0025 0.003 0.0035 0.004 0.0045 0.005)
 GRID_T_LIST=(0.007)                #0.004 0.005 0.006 0.007 0.008 0.009 0.01)
-GAP_LIST=(0.001 0.0012 0.0013 0.0014 0.0016 0.0018 0.002)
+GAP_LIST=(0.001)
 
 # Chamfers (8 independent controls)
 SCR_UP_DEPTH_LIST=(0.0)
@@ -102,14 +107,33 @@ ACC_UP_ANGLE_LIST=(0) #20 45)
 ACC_DN_DEPTH_LIST=(0.0)
 ACC_DN_ANGLE_LIST=(0.0)
 
+# Offset sweeps
+make_seq() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import sys, math
+start = float(sys.argv[1])
+step = float(sys.argv[2])
+try:
+    count = int(float(sys.argv[3]))
+except Exception:
+    count = 1
+if count < 1:
+    count = 1
+vals = [start + i * step for i in range(count)]
+print(" ".join(f"{v:.12g}" for v in vals))
+PY
+}
+
+ACCEL_OFF_LIST=( $(make_seq "$ACCEL_OFF_START_M" "$ACCEL_OFF_STEP_M" "$ACCEL_OFF_COUNT") )
+
 # =====================================================================================
 # Stage-2 control
 # =====================================================================================
-RUN_STAGE2="${RUN_STAGE2:-0}"   # 0=no refine; 1=submit refine after reducer
+RUN_STAGE2="${RUN_STAGE2:-1}"   # 0=no refine; 1=submit refine after reducer
 
 # FIX: set an explicit knob list. If you want auto-pick later, set OPT_KNOBS="".
-# (current default: aperture radius + grid thickness + gap)
-OPT_KNOBS="${OPT_KNOBS:-AP_RAD_M, GRID_T_M, GAP_M}"
+# (current default: chamfer-only tweaks)
+OPT_KNOBS="${OPT_KNOBS:-SCR_UP_DEPTH_M,SCR_UP_ANGLE_DEG,SCR_DN_DEPTH_M,SCR_DN_ANGLE_DEG,ACC_UP_DEPTH_M,ACC_UP_ANGLE_DEG,ACC_DN_DEPTH_M,ACC_DN_ANGLE_DEG}"
 
 # These are ignored when OPT_KNOBS is non-empty, but keep sane defaults:
 MAX_KNOBS="${MAX_KNOBS:-3}"
@@ -149,12 +173,13 @@ DF_B64="$(printf '%s' "$DELTA_FLOORS_JSON" | base64 -w0 2>/dev/null || printf '%
 STAGE2_MODE="${STAGE2_MODE:-smart}"
 
 # Outer loop + stopping criteria
-ST2_MAX_ITERS="${ST2_MAX_ITERS:-20}"      # max outer iterations
-ST2_NO_IMPROVE="${ST2_NO_IMPROVE:-3}"    # stop after N iters with no better score
+ST2_MAX_ITERS="${ST2_MAX_ITERS:-40}"      # max outer iterations
+ST2_NO_IMPROVE="${ST2_NO_IMPROVE:-5}"    # stop after N iters with no better score
 ST2_BATCH_SIZE="${ST2_BATCH_SIZE:-5}"    # concurrent srun evaluations
 ST2_SEED="${ST2_SEED:-42069}"                # RNG seed (0 = deterministic per campaign)
 
-# Scoring weights (verticality vs collimation vs current)
+# Scoring uses beam_metrics (I_ag_out_A, divergence, y_mean_pred_500mm_m).
+# Legacy weights below are unused but kept for compatibility.
 ST2_W_VERT="${ST2_W_VERT:-1.0}"
 ST2_W_COLL="${ST2_W_COLL:-1.0}"
 ST2_W_CURR="${ST2_W_CURR:-1.0}"   # weight for "distance from 4A" term
@@ -211,6 +236,7 @@ ACC_UP_DEPTH_LIST=__ACC_UP_DEPTH_LIST__
 ACC_UP_ANGLE_LIST=__ACC_UP_ANGLE_LIST__
 ACC_DN_DEPTH_LIST=__ACC_DN_DEPTH_LIST__
 ACC_DN_ANGLE_LIST=__ACC_DN_ANGLE_LIST__
+ACCEL_OFF_LIST=__ACCEL_OFF_LIST__
 
 export H=__H__
 export X_LEFT_M=__X_LEFT_M__
@@ -261,6 +287,7 @@ AU_D="$(arrlit_escaped ACC_UP_DEPTH_LIST)"
 AU_A="$(arrlit_escaped ACC_UP_ANGLE_LIST)"
 AD_D="$(arrlit_escaped ACC_DN_DEPTH_LIST)"
 AD_A="$(arrlit_escaped ACC_DN_ANGLE_LIST)"
+AO_L="$(arrlit_escaped ACCEL_OFF_LIST)"
 
 # Pre-escape scalars
 E_H="$(sed_escape "$H")"
@@ -307,6 +334,7 @@ sed -i \
   -e "s#__ACC_UP_ANGLE_LIST__#${AU_A}#" \
   -e "s#__ACC_DN_DEPTH_LIST__#${AD_D}#" \
   -e "s#__ACC_DN_ANGLE_LIST__#${AD_A}#" \
+  -e "s#__ACCEL_OFF_LIST__#${AO_L}#" \
   -e "s#__H__#${E_H}#" \
   -e "s#__X_LEFT_M__#${E_XL}#" \
   -e "s#__X_RIGHT_M__#${E_XR}#" \
@@ -350,7 +378,8 @@ nSUd=$(len SCR_UP_DEPTH_LIST); nSUa=$(len SCR_UP_ANGLE_LIST)
 nSDd=$(len SCR_DN_DEPTH_LIST); nSDa=$(len SCR_DN_ANGLE_LIST)
 nAUd=$(len ACC_UP_DEPTH_LIST); nAUa=$(len ACC_UP_ANGLE_LIST)
 nADd=$(len ACC_DN_DEPTH_LIST); nADa=$(len ACC_DN_ANGLE_LIST)
-TOTAL=$(( nR*nT*nG*nSUd*nSUa*nSDd*nSDa*nAUd*nAUa*nADd*nADa ))
+nAO=$(len ACCEL_OFF_LIST)
+TOTAL=$(( nR*nT*nG*nSUd*nSUa*nSDd*nSDa*nAUd*nAUa*nADd*nADa*nAO ))
 echo "[orchestrator] Stage-1 total combinations = $TOTAL"
 
 # =====================================================================================
@@ -391,7 +420,8 @@ iSDa=$(( i % ${#SCR_DN_ANGLE_LIST[@]} )); i=$(( i / ${#SCR_DN_ANGLE_LIST[@]} ))
 iAUd=$(( i % ${#ACC_UP_DEPTH_LIST[@]} )); i=$(( i / ${#ACC_UP_DEPTH_LIST[@]} ))
 iAUa=$(( i % ${#ACC_UP_ANGLE_LIST[@]} )); i=$(( i / ${#ACC_UP_ANGLE_LIST[@]} ))
 iADd=$(( i % ${#ACC_DN_DEPTH_LIST[@]} )); i=$(( i / ${#ACC_DN_DEPTH_LIST[@]} ))
-iADa=$(( i % ${#ACC_DN_ANGLE_LIST[@]} ))
+iADa=$(( i % ${#ACC_DN_ANGLE_LIST[@]} )); i=$(( i / ${#ACC_DN_ANGLE_LIST[@]} ))
+iAO=$(( i % ${#ACCEL_OFF_LIST[@]} ))
 
 export AP_RAD_M=$(pick "$iR"  "${AP_RAD_LIST[@]}")
 export GRID_T_M=$(pick "$iT"  "${GRID_T_LIST[@]}")
@@ -404,6 +434,7 @@ export ACC_UP_DEPTH_M=$(pick "$iAUd" "${ACC_UP_DEPTH_LIST[@]}")
 export ACC_UP_ANGLE_DEG=$(pick "$iAUa" "${ACC_UP_ANGLE_LIST[@]}")
 export ACC_DN_DEPTH_M=$(pick "$iADd" "${ACC_DN_DEPTH_LIST[@]}")
 export ACC_DN_ANGLE_DEG=$(pick "$iADa" "${ACC_DN_ANGLE_LIST[@]}")
+export ACCEL_OFF_Y_M=$(pick "$iAO" "${ACCEL_OFF_LIST[@]}")
 
 sanitize(){ echo "$1" | sed -e 's/\./p/g' -e 's/-/m/g'; }
 rt=$(sanitize "$AP_RAD_M"); gt=$(sanitize "$GRID_T_M"); gp=$(sanitize "$GAP_M")
@@ -411,8 +442,9 @@ suD=$(sanitize "$SCR_UP_DEPTH_M"); suA=$(sanitize "$SCR_UP_ANGLE_DEG")
 sdD=$(sanitize "$SCR_DN_DEPTH_M"); sdA=$(sanitize "$SCR_DN_ANGLE_DEG")
 auD=$(sanitize "$ACC_UP_DEPTH_M");  auA=$(sanitize "$ACC_UP_ANGLE_DEG")
 adD=$(sanitize "$ACC_DN_DEPTH_M");  adA=$(sanitize "$ACC_DN_ANGLE_DEG")
+ao=$(sanitize "$ACCEL_OFF_Y_M");    so=$(sanitize "$SCREEN_OFF_Y_M")
 
-export RUN_TAG="i${idx}_rad${rt}_t${gt}_gap${gp}_SU(${suD},${suA})_SD(${sdD},${sdA})_AU(${auD},${auA})_AD(${adD},${adA})"
+export RUN_TAG="i${idx}_rad${rt}_t${gt}_gap${gp}_AO${ao}_SO${so}_SU(${suD},${suA})_SD(${sdD},${sdA})_AU(${auD},${auA})_AD(${adD},${adA})"
 
 echo "[$(date)] running..."
 srun --ntasks=1 "__PIPE_ROOT__/bin/two_grid_2d"
@@ -457,35 +489,46 @@ def loadj(p):
     try: return json.loads(p.read_text())
     except Exception: return None
 
-def score(m):
+def score_run(run: Path):
     """
-    Stage-1 score:
+    Score a run using beam diagnostics:
+      1) |Y_MEAN_PRED_500MM_M| closest to 0
+      2) DIVERGENCE_ANGLE_DEG smallest
+      3) I_AG_OUT_A largest
 
-    Prefer the column-based metric if available:
-      metrics["column_verticality"][COL_METRIC]
-    else fall back to the legacy area metric:
-      metrics["verticality"][METRIC]
-
-    Lower score is better.
+    Disqualify if LOST_TO_SIDEWALLS is true.
     """
-    m = m or {}
-    v_col = m.get("column_verticality") or {}
-    v     = m.get("verticality") or {}
+    bm = loadj(run/"beam_metrics.json") or {}
+    coll = bm.get("collimation") or {}
+    if coll.get("lost_to_sidewalls") in (True, 1, "1", "true"):
+        return None
 
-    # Column metric first (uses averaged field vectors along columns)
-    if v_col:
-        try:
-            val = float(v_col.get(COL_METRIC, 1e99))
-        except Exception:
-            val = 1e99
-        return val, {"column_verticality": v_col, "verticality": v}
+    defl = bm.get("deflection") or {}
+    cur  = bm.get("currents") or {}
 
-    # Fallback: old near-field area metric
+    y_pred = defl.get("y_mean_pred_500mm_m")
+    div_deg = bm.get("DIVERGENCE_ANGLE_DEG")
+    if div_deg is None:
+        div_deg = bm.get("divergence_angle_deg")
+    I_ag = cur.get("I_ag_out_A")
+
     try:
-        val = float(v.get(METRIC, 1e99))
+        y_pred = float(y_pred)
+        div_deg = float(div_deg)
+        I_ag = float(I_ag)
     except Exception:
-        val = 1e99
-    return val, v
+        return None
+
+    abs_y = abs(y_pred)
+    score = (abs_y, div_deg, -I_ag)
+    info = {
+        "y_mean_pred_500mm_m": y_pred,
+        "abs_y_mean_pred_500mm_m": abs_y,
+        "divergence_angle_deg": div_deg,
+        "I_ag_out_A": I_ag,
+        "lost_to_sidewalls": bool(coll.get("lost_to_sidewalls", False)),
+    }
+    return score, info
 
 
 def pick_pngs(d:Path):
@@ -517,16 +560,11 @@ def collect_rows(root: Path):
     rows=[]
     for meta in root.rglob("meta.json"):
         run = meta.parent
-        met = loadj(run/"metrics.json") or {}
-
-        v_col = met.get("column_verticality") or {}
-        v     = met.get("verticality") or {}
-
-        if v_col:
-            y = v_col.get(COL_METRIC, None)
-        else:
-            y = v.get(METRIC, None)
-
+        scored = score_run(run)
+        if not scored:
+            continue
+        score, info = scored
+        y = info.get("abs_y_mean_pred_500mm_m")
         if y is None:
             continue
 
@@ -593,31 +631,40 @@ def main():
     items=[]
     for meta in RESULTS.rglob("meta.json"):
         run=meta.parent
-        met = loadj(run/"metrics.json")
-        if not met: continue
-        s, vfull = score(met)
-        if s>=1e98: continue
-        items.append({"run":run, "meta":loadj(meta), "metrics":vfull, "score":s})
+        scored = score_run(run)
+        if not scored:
+            continue
+        s, info = scored
+        items.append({"run":run, "meta":loadj(meta), "beam":info, "score":s})
     if not items:
         print("[reduce] no runs with metrics found", file=sys.stderr); sys.exit(2)
 
-    items.sort(key=lambda r: r["score"], reverse=not ASCEND)
+    items.sort(key=lambda r: r["score"])
     stamp=time.strftime("%Y%m%d_%H%M%S")
     outdir=RESULTS/"_stage1_best"/stamp
     outdir.mkdir(parents=True, exist_ok=True)
 
     top=[]
     for r in items[:min(TOPK,len(items))]:
-        row={"run_dir":str(r["run"]), "score_metric":METRIC, "score_value":r["score"], "verticality":r["metrics"]}
+        row={"run_dir":str(r["run"]),
+             "score_keys":["abs_y_mean_pred_500mm_m","divergence_angle_deg","-I_ag_out_A"],
+             "score_values":[r["beam"]["abs_y_mean_pred_500mm_m"],
+                             r["beam"]["divergence_angle_deg"],
+                             -r["beam"]["I_ag_out_A"]],
+             "beam_metrics":r["beam"]}
         row.update(extract_geom(r["meta"]))
         top.append(row)
-    (outdir/"topk.json").write_text(json.dumps({"metric":METRIC,"ascending":ASCEND,"topk":top}, indent=2))
+    (outdir/"topk.json").write_text(json.dumps({"ranking":"abs(y_mean_pred_500mm_m), divergence_angle_deg, -I_ag_out_A",
+                                                "topk":top}, indent=2))
 
     best=items[0]
     geom=extract_geom(best["meta"])
     (outdir/"best.json").write_text(json.dumps({
-        "metric":METRIC,"ascending":ASCEND,"score":best["score"],
-        "run_dir":str(best["run"]), "verticality":best["metrics"], "geom":geom
+        "ranking":"abs(y_mean_pred_500mm_m), divergence_angle_deg, -I_ag_out_A",
+        "score_values":[best["beam"]["abs_y_mean_pred_500mm_m"],
+                        best["beam"]["divergence_angle_deg"],
+                        -best["beam"]["I_ag_out_A"]],
+        "run_dir":str(best["run"]), "beam_metrics":best["beam"], "geom":geom
     }, indent=2))
 
     seed=(outdir/"seed_stage2.env")
@@ -647,7 +694,7 @@ def main():
         for k,d in deltas.items():
             f.write(f"export DELTA_{k}={d}\n")
 
-    print(f"[reduce] best: {best['run']}  score={best['score']:.6e}")
+    print(f"[reduce] best: {best['run']}  score={best['score']}")
     print(f"[reduce] seed: {seed}")
     print(f"[reduce] knobs: {knobs} with deltas {deltas}")
     print(f"[reduce] out : {outdir}")
@@ -719,30 +766,10 @@ if not stamp:
     stamp = time.strftime("%Y%m%d_%H%M%S")
     os.environ["RUN_STAMP"] = stamp
 
-# Verticality metric name (should match what two_grid_2d wrote into metrics.json)
-VERT_METRIC = os.environ.get("VERT_METRIC", "mean_angle_deg")
-
-# Stage-2 scoring parameters (can override via env)
-W_VERT = float(os.environ.get("ST2_W_VERT", "1.0"))
-W_COLL = float(os.environ.get("ST2_W_COLL", "1.0"))
-W_CURR = float(os.environ.get("ST2_W_CURR", "0.3"))
-
-THETA_REF = float(os.environ.get("ST2_THETA_REF_DEG", "2.0"))      # deg
-R_REF     = float(os.environ.get("ST2_R_REF_M", "2.0e-3"))         # m
-I_TARGET  = float(os.environ.get("ST2_I_TARGET_A", "4.0"))         # A, full-grid target
-I_MIN_FRAC = float(os.environ.get("ST2_I_MIN_FRAC", "0.66"))
-
-# If ST2_I_MIN_TOTAL_A is a non-empty, numeric string, use it.
-# Otherwise derive from fraction * target.
-_raw_min = os.environ.get("ST2_I_MIN_TOTAL_A", "").strip()
-if _raw_min:
-    try:
-        I_MIN_TOTAL = float(_raw_min)
-    except ValueError:
-        # fall back if user set a non-numeric value
-        I_MIN_TOTAL = I_TARGET * I_MIN_FRAC
-else:
-    I_MIN_TOTAL = I_TARGET * I_MIN_FRAC
+# Stage-2 scoring:
+#   1) I_ag_out_A (higher is better)
+#   2) divergence_angle_deg (lower is better)
+#   3) |y_mean_pred_500mm_m| (lower is better)
 
 
 MAX_ITERS       = int(os.environ.get("ST2_MAX_ITERS", "10"))
@@ -788,98 +815,73 @@ def load_json(p: Path) -> Any:
     except Exception:
         return None
 
-
-def score_run(run_dir: Path) -> Tuple[float, Dict[str, Any]]:
-    """
-    Compute a scalar score from metrics.json + beam_metrics.json,
-    using aperture-scaled total beam current.
-
-    Lower score is better.
-    """
-    met = load_json(run_dir / "metrics.json") or {}
-    v   = (met.get("verticality") or {})
-    theta = v.get(VERT_METRIC, None)
-    if theta is None:
-        return math.inf, {"reason": "no_verticality"}
-
+def to_float(v: Any) -> Any:
     try:
-        theta = float(theta)
+        f = float(v)
     except Exception:
-        return math.inf, {"reason": "bad_verticality"}
+        return None
+    return f if math.isfinite(f) else None
 
-    # Get aperture radius for this run from meta.json (preferred) or env fallback
-    meta = load_json(run_dir / "meta.json") or {}
-    ap_rad_m = None
-    if isinstance(meta, dict):
-        ap_rad_m = meta.get("AP_RAD_M")
+def fmt_score(score: Any) -> str:
+    if isinstance(score, (tuple, list)):
+        parts = []
+        for x in score:
+            if isinstance(x, (int, float)) and math.isfinite(x):
+                parts.append(f"{x:.6g}")
+            else:
+                parts.append(str(x))
+        return "(" + ", ".join(parts) + ")"
+    if isinstance(score, (int, float)) and math.isfinite(score):
+        return f"{score:.6g}"
+    return str(score)
+
+def score_key(score: Any) -> Tuple[float, ...]:
+    if isinstance(score, (tuple, list)):
+        try:
+            return tuple(float(x) for x in score)
+        except Exception:
+            return (math.inf, math.inf, math.inf)
     try:
-        if ap_rad_m is None:
-            ap_rad_m = float(os.environ.get("AP_RAD_M", "1.0e-3"))
-        else:
-            ap_rad_m = float(ap_rad_m)
+        return (float(score),)
     except Exception:
-        ap_rad_m = 1.0e-3  # conservative fallback: 1 mm
+        return (math.inf,)
 
+def score_to_list(score: Any) -> List[float]:
+    if isinstance(score, (tuple, list)):
+        return [float(x) for x in score]
+    return [float(score)]
+
+
+def score_run(run_dir: Path) -> Tuple[Tuple[float, float, float], Dict[str, Any]]:
+    """
+    Score a run using beam diagnostics from beam_metrics.json.
+    """
     bm = load_json(run_dir / "beam_metrics.json") or {}
     coll = (bm.get("collimation") or {})
-    sm   = (bm.get("sample") or {})
+    if coll.get("lost_to_sidewalls") in (True, 1, "1", "true"):
+        return (math.inf, math.inf, math.inf), {"reason": "lost_to_sidewalls"}
 
-    has_sample = bool(coll.get("has_sample_beam", False))
-    good_single = bool(coll.get("good_single_beam", False))
+    defl = (bm.get("deflection") or {})
+    cur = (bm.get("currents") or {})
 
-    # Hard filters: must have a good single beam hitting the sample
-    if not has_sample:
-        return math.inf, {"theta_deg": theta, "reason": "no_sample_beam"}
-    if not good_single:
-        return math.inf, {"theta_deg": theta, "reason": "not_single_beam"}
+    i_ag = to_float(cur.get("I_ag_out_A"))
+    div_deg = bm.get("DIVERGENCE_ANGLE_DEG")
+    if div_deg is None:
+        div_deg = bm.get("divergence_angle_deg")
+    div_deg = to_float(div_deg)
+    y_pred = to_float(defl.get("y_mean_pred_500mm_m"))
 
-    try:
-        I_A   = float(sm.get("I_A", 0.0))          # single-beamlet 3D current [A]
-        r_rms = float(sm.get("y_rms_m", 0.0))      # rms radius at sample [m]
-    except Exception:
-        return math.inf, {"theta_deg": theta, "reason": "bad_beam_numbers"}
+    if i_ag is None or div_deg is None or y_pred is None:
+        return (math.inf, math.inf, math.inf), {"reason": "missing_metrics"}
 
-    # Estimate how many such apertures could fit on the grid
-    n_beamlets = estimate_beamlet_count(ap_rad_m)
-    I_total = I_A * n_beamlets
-
-    # Hard filter: require minimum total current capability
-    if I_total < I_MIN_TOTAL:
-        return math.inf, {
-            "theta_deg": theta,
-            "I_A": I_A,
-            "I_total_A": I_total,
-            "n_beamlets": n_beamlets,
-            "reason": "total_current_below_min",
-        }
-
-    # Normalized components for cost function
-    theta_norm = theta / (THETA_REF if THETA_REF > 0 else 1.0)
-    r_norm     = r_rms / (R_REF     if R_REF     > 0 else 1.0)
-
-    if I_TARGET > 0.0:
-        I_mismatch = abs(I_total - I_TARGET) / I_TARGET
-    else:
-        I_mismatch = 0.0
-
-    # Composite score:
-    #   lower theta (straighter equipotentials)  -> better
-    #   smaller beam radius at sample           -> better
-    #   total current closer to 4 A             -> better (smaller mismatch)
-    score = W_VERT * theta_norm + W_COLL * r_norm + W_CURR * I_mismatch
-
+    abs_y = abs(y_pred)
+    score = (-i_ag, div_deg, abs_y)
     info = {
-        "theta_deg": theta,
-        "theta_norm": theta_norm,
-        "r_rms_m": r_rms,
-        "r_norm": r_norm,
-        "I_A": I_A,
-        "I_total_A": I_total,
-        "I_mismatch": I_mismatch,
-        "n_beamlets": n_beamlets,
-        "ap_rad_m": ap_rad_m,
-        "has_sample_beam": has_sample,
-        "good_single_beam": good_single,
+        "I_ag_out_A": i_ag,
+        "divergence_angle_deg": div_deg,
+        "y_mean_pred_500mm_m": y_pred,
+        "abs_y_mean_pred_500mm_m": abs_y,
+        "lost_to_sidewalls": bool(coll.get("lost_to_sidewalls", False)),
     }
     return score, info
 
@@ -954,7 +956,7 @@ def launch_candidate(tag: str, knob_vals: Dict[str, float]) -> subprocess.Popen:
     return subprocess.Popen(cmd, env=env)
 
 
-def evaluate_candidate(tag: str, knob_vals: Dict[str, float]) -> Tuple[float, Dict[str, Any]]:
+def evaluate_candidate(tag: str, knob_vals: Dict[str, float]) -> Tuple[Tuple[float, float, float], Dict[str, Any]]:
     """
     Launch and wait for a candidate, then read its metrics and score it.
     """
@@ -962,14 +964,14 @@ def evaluate_candidate(tag: str, knob_vals: Dict[str, float]) -> Tuple[float, Di
     ret = proc.wait()
     if ret != 0:
         print(f"[stage2] WARNING: run {tag} exited with code {ret}", flush=True)
-        return math.inf, {"reason": f"exit_{ret}", "tag": tag, "knobs": knob_vals}
+        return (math.inf, math.inf, math.inf), {"reason": f"exit_{ret}", "tag": tag, "knobs": knob_vals}
 
     rdir = make_run_dir(tag)
     score, info = score_run(rdir)
     info["run_dir"] = str(rdir)
     info["tag"] = tag
     info["knobs"] = {k: float(v) for k, v in knob_vals.items()}
-    print(f"[stage2] result {tag}: score={score:.6g} info={info}", flush=True)
+    print(f"[stage2] result {tag}: score={fmt_score(score)} info={info}", flush=True)
     return score, info
 
 
@@ -1005,11 +1007,11 @@ def main():
         outdir = RESULTS / "_stage2_best"
         outdir.mkdir(parents=True, exist_ok=True)
         (outdir / "stage2_best.json").write_text(json.dumps({
-            "best_score": score,
+            "best_score": score_to_list(score),
             "best": info,
             "keys": [],
             "values": {},
-            "history": [info],
+            "history": [{"score": score_to_list(score), **info}],
         }, indent=2))
         return
 
@@ -1032,7 +1034,7 @@ def main():
     best_vals = materialize(best_idx)
     best_tag = "s2_seed"
     best_score, best_info = evaluate_candidate(best_tag, best_vals)
-    print(f"[stage2] initial best: score={best_score:.6g} tag={best_tag}", flush=True)
+    print(f"[stage2] initial best: score={fmt_score(best_score)} tag={best_tag}", flush=True)
 
     history = []
     history.append({"tag": best_tag, "score": best_score, **best_info})
@@ -1074,7 +1076,7 @@ def main():
                 ret = p.wait()
                 if ret != 0:
                     print(f"[stage2] WARNING: run {tag} exited with code {ret}", flush=True)
-                    score = math.inf
+                    score = (math.inf, math.inf, math.inf)
                     info = {"reason": f"exit_{ret}", "tag": tag, "knobs": vals}
                 else:
                     rdir = make_run_dir(tag)
@@ -1084,10 +1086,10 @@ def main():
                     info["knobs"] = vals
 
                 history.append({"tag": tag, "score": score, **info})
-                print(f"[stage2] candidate {tag}: score={score:.6g}", flush=True)
+                print(f"[stage2] candidate {tag}: score={fmt_score(score)}", flush=True)
 
                 if score < best_score:
-                    print(f"[stage2] NEW BEST: {score:.6g} (prev {best_score:.6g}) at {tag}", flush=True)
+                    print(f"[stage2] NEW BEST: {fmt_score(score)} (prev {fmt_score(best_score)}) at {tag}", flush=True)
                     best_score = score
                     best_info = info
                     best_idx = dict(nm)
@@ -1105,15 +1107,22 @@ def main():
     # Write summary
     outdir = RESULTS / "_stage2_best"
     outdir.mkdir(parents=True, exist_ok=True)
+    hist_sorted = sorted(history, key=lambda h: score_key(h.get("score", (math.inf, math.inf, math.inf))))
+    hist_out = []
+    for h in hist_sorted[:50]:
+        row = dict(h)
+        row["score"] = score_to_list(h.get("score", (math.inf, math.inf, math.inf)))
+        hist_out.append(row)
+
     summary = {
-        "best_score": best_score,
+        "best_score": score_to_list(best_score),
         "best": best_info,
-        "history": sorted(history, key=lambda h: h.get("score", math.inf))[:50],
+        "history": hist_out,
         "keys": keys,
         "values": {k: [float(x) for x in vs] for k, vs in value_lists.items()},
     }
     (outdir / "stage2_best.json").write_text(json.dumps(summary, indent=2))
-    print(f"[stage2] done. Best score={best_score:.6g}, summary at {outdir/'stage2_best.json'}", flush=True)
+    print(f"[stage2] done. Best score={fmt_score(best_score)}, summary at {outdir/'stage2_best.json'}", flush=True)
 
 
 if __name__ == "__main__":
@@ -1156,6 +1165,9 @@ if [[ -z "${OPT_KNOBS:-}" && -f "__RESULTS_DIR__/_stage1_best/latest/knobs_stage
   # shellcheck source=/dev/null
   source "__RESULTS_DIR__/_stage1_best/latest/knobs_stage2.env"
 fi
+if [[ -z "${OPT_KNOBS:-}" ]]; then
+  OPT_KNOBS="SCR_UP_DEPTH_M,SCR_UP_ANGLE_DEG,SCR_DN_DEPTH_M,SCR_DN_ANGLE_DEG,ACC_UP_DEPTH_M,ACC_UP_ANGLE_DEG,ACC_DN_DEPTH_M,ACC_DN_ANGLE_DEG"
+fi
 echo "[refine] optimizing knobs: ${OPT_KNOBS:-<none>}"
 
 triplet() { python3 - "$1" "$2" <<'PY'
@@ -1179,16 +1191,22 @@ IFS=',' read -r -a KNOBS <<< "${OPT_KNOBS:-}"
 for K in "${KNOBS[@]}"; do
   K=$(echo "$K" | xargs)
   case "$K" in
-    AP_RAD_M|GAP_M|GRID_T_M|ACCEL_OFF_Y_M|SCREEN_OFF_Y_M|SCR_UP_DEPTH_M|SCR_DN_DEPTH_M|ACC_UP_DEPTH_M|ACC_DN_DEPTH_M|SCR_UP_ANGLE_DEG|SCR_DN_ANGLE_DEG|ACC_UP_ANGLE_DEG|ACC_DN_ANGLE_DEG)
+    SCR_UP_DEPTH_M|SCR_DN_DEPTH_M|ACC_UP_DEPTH_M|ACC_DN_DEPTH_M|SCR_UP_ANGLE_DEG|SCR_DN_ANGLE_DEG|ACC_UP_ANGLE_DEG|ACC_DN_ANGLE_DEG)
       add_list "$K" "${!K}"
       ;;
     *) echo "[refine] WARNING: unknown knob '$K' ignored";;
   esac
 done
+if [[ ${#LISTS[@]} -eq 0 ]]; then
+  echo "[refine] no chamfer knobs selected; falling back to default chamfer list."
+  for K in SCR_UP_DEPTH_M SCR_UP_ANGLE_DEG SCR_DN_DEPTH_M SCR_DN_ANGLE_DEG ACC_UP_DEPTH_M ACC_UP_ANGLE_DEG ACC_DN_DEPTH_M ACC_DN_ANGLE_DEG; do
+    add_list "$K" "${!K}"
+  done
+fi
 
 # Base env for two_grid_2d
 export H="__H__" X_LEFT_M="__X_LEFT_M__" X_RIGHT_M="__X_RIGHT_M__" YBOX_M="__YBOX_M__"
-export ACCEL_OFF_Y_M="__ACCEL_OFF_Y_M__" SCREEN_OFF_Y_M="__SCREEN_OFF_Y_M__"
+export ACCEL_OFF_Y_M="${ACCEL_OFF_Y_M:-__ACCEL_OFF_Y_M__}" SCREEN_OFF_Y_M="${SCREEN_OFF_Y_M:-__SCREEN_OFF_Y_M__}"
 export X_RIGHT_PHYS_M="__X_RIGHT_PHYS_M__"
 export VS_V="__VS_V__" VA_V="__VA_V__" SAMPLE_V="__SAMPLE_V__"
 export TUBE_WALL_T_M="__TUBE_WALL_T_M__" SAMPLE_PLATE_T_M="__SAMPLE_PLATE_T_M__"
