@@ -94,14 +94,14 @@ PLASMA_TE_EV=${PLASMA_TE_EV:-3.7}
 
 # Beam / SC tuning knobs
 ION_J_SCALE=${ION_J_SCALE:-1.0} #1.0 = nominal Bohm current
-SC_FACTOR=${SC_FACTOR:-0.1} # 1.0 = full space charge, <1.0 = partially neutralized
+SC_FACTOR=${SC_FACTOR:-0.0005} # 1.0 = full space charge, <1.0 = partially neutralized
 
 # =====================================================================================
 # SWEEP LISTS
 # =====================================================================================
 # Geometry
 AP_RAD_LIST=(0.0015)               # 0.001 0.0015 0.002 0.0025 0.003 0.0035 0.004 0.0045 0.005)
-GRID_T_LIST=(0.006)                #0.004 0.005 0.006 0.007 0.008 0.009 0.01)
+GRID_T_LIST=(0.005)                #0.004 0.005 0.006 0.007 0.008 0.009 0.01)
 GAP_LIST=(0.001)
 
 # Chamfers (8 independent controls)
@@ -140,7 +140,7 @@ RUN_STAGE2="${RUN_STAGE2:-1}"   # 0=no refine; 1=submit refine after reducer
 
 # FIX: set an explicit knob list. If you want auto-pick later, set OPT_KNOBS="".
 # (current default: chamfer-only tweaks)
-OPT_KNOBS="${OPT_KNOBS:-ACC_UP_DEPTH_M,ACC_UP_ANGLE_DEG,ACC_DN_DEPTH_M,ACC_DN_ANGLE_DEG, ACCEL_OFF_Y_M}"
+OPT_KNOBS="${OPT_KNOBS:-ACCEL_OFF_Y_M}"
 
 # These are ignored when OPT_KNOBS is non-empty, but keep sane defaults:
 MAX_KNOBS="${MAX_KNOBS:-3}"
@@ -185,7 +185,20 @@ ST2_NO_IMPROVE="${ST2_NO_IMPROVE:-5}"    # stop after N iters with no better sco
 ST2_BATCH_SIZE="${ST2_BATCH_SIZE:-5}"    # concurrent srun evaluations
 ST2_SEED="${ST2_SEED:-42069}"                # RNG seed (0 = deterministic per campaign)
 
-# Scoring uses beam_metrics (I_ag_out_A, divergence, y_mean_pred_500mm_m).
+# Stage-2 scoring configuration
+# mode: lex (tuple ordering) or weighted (single scalar)
+ST2_SCORE_MODE="${ST2_SCORE_MODE:-lex}"
+ST2_I_FIELD="${ST2_I_FIELD:-I_ag_out_A}"
+ST2_DIV_FIELD="${ST2_DIV_FIELD:-divergence_angle_deg}"
+ST2_Y_FIELD="${ST2_Y_FIELD:-y_mean_pred_500mm_m}"
+ST2_W_I="${ST2_W_I:-0.5}"
+ST2_W_DIV="${ST2_W_DIV:-0.1}"
+ST2_W_Y="${ST2_W_Y:-1.0}"
+ST2_I_REF_A="${ST2_I_REF_A:-0.004}"   # reference current for scoring (e.g. 4 mA)
+ST2_DIV_REF_DEG="${ST2_DIV_REF_DEG:-1.0}"
+ST2_Y_REF_M="${ST2_Y_REF_M:-1.0e-3}"
+ST2_Y_ABS="${ST2_Y_ABS:-1}"
+
 # Legacy weights below are unused but kept for compatibility.
 ST2_W_VERT="${ST2_W_VERT:-1.0}"
 ST2_W_COLL="${ST2_W_COLL:-1.0}"
@@ -204,6 +217,8 @@ ST2_I_MIN_TOTAL_A="${ST2_I_MIN_TOTAL_A:-}"
 # (keep existing export line, just extend it)
 export RUN_STAGE2 OPT_KNOBS MAX_KNOBS VERT_METRIC TOPK \
        STAGE2_MODE ST2_MAX_ITERS ST2_NO_IMPROVE ST2_BATCH_SIZE ST2_SEED \
+       ST2_SCORE_MODE ST2_I_FIELD ST2_DIV_FIELD ST2_Y_FIELD \
+       ST2_W_I ST2_W_DIV ST2_W_Y ST2_I_REF_A ST2_DIV_REF_DEG ST2_Y_REF_M ST2_Y_ABS \
        ST2_W_VERT ST2_W_COLL ST2_W_CURR \
        ST2_I_TARGET_A ST2_I_MIN_FRAC ST2_I_MIN_TOTAL_A \
        ST2_THETA_REF_DEG ST2_R_REF_M ST2_I_REF_A ST2_I_MIN_A
@@ -867,6 +882,18 @@ PLOT_PROFILE = os.environ.get("PLOT_PROFILE", "1").strip() != "0"
 PLOT_PROFILE_Y = os.environ.get("PLOT_PROFILE_Y", "I_Apm").strip() or "I_Apm"
 PLOT_PROFILE_X_UNITS = os.environ.get("PLOT_PROFILE_X_UNITS", "mm").strip() or "mm"
 PLOT_PROFILE_EXT = os.environ.get("PLOT_PROFILE_EXT", "png").strip() or "png"
+
+# Stage-2 scoring configuration
+SCORE_MODE = os.environ.get("ST2_SCORE_MODE", "lex").strip().lower()
+I_FIELD = os.environ.get("ST2_I_FIELD", "I_ag_out_A").strip() or "I_ag_out_A"
+DIV_FIELD = os.environ.get("ST2_DIV_FIELD", "divergence_angle_deg").strip() or "divergence_angle_deg"
+Y_FIELD = os.environ.get("ST2_Y_FIELD", "y_mean_pred_500mm_m").strip() or "y_mean_pred_500mm_m"
+W_I = float(os.environ.get("ST2_W_I", "1.0"))
+W_DIV = float(os.environ.get("ST2_W_DIV", "1.0"))
+W_Y = float(os.environ.get("ST2_W_Y", "1.0"))
+I_REF = float(os.environ.get("ST2_I_REF_A", "1.0"))
+DIV_REF = float(os.environ.get("ST2_DIV_REF_DEG", "1.0"))
+Y_REF = float(os.environ.get("ST2_Y_REF_M", "1.0e-3"))
 PLOT_SCRIPT = PIPE_ROOT / "plot_runlog_compact.py"
 
 def plot_profile(run_dir: Path) -> None:
@@ -970,7 +997,7 @@ def score_to_list(score: Any) -> List[float]:
     return [float(score)]
 
 
-def score_run(run_dir: Path) -> Tuple[Tuple[float, float, float], Dict[str, Any]]:
+def score_run(run_dir: Path) -> Tuple[Any, Dict[str, Any]]:
     """
     Score a run using beam diagnostics from beam_metrics.json.
     """
@@ -982,25 +1009,58 @@ def score_run(run_dir: Path) -> Tuple[Tuple[float, float, float], Dict[str, Any]
     defl = (bm.get("deflection") or {})
     cur = (bm.get("currents") or {})
 
-    i_ag = to_float(cur.get("I_ag_out_A"))
-    div_deg = bm.get("DIVERGENCE_ANGLE_DEG")
-    if div_deg is None:
-        div_deg = bm.get("divergence_angle_deg")
-    div_deg = to_float(div_deg)
-    y_pred = to_float(defl.get("y_mean_pred_500mm_m"))
+    def pick_field(field: str) -> Any:
+        if not field:
+            return None
+        if "." in field:
+            sect, key = field.split(".", 1)
+            if sect == "deflection":
+                return defl.get(key)
+            if sect == "currents":
+                return cur.get(key)
+            return bm.get(field)
+        if field in defl:
+            return defl.get(field)
+        if field in cur:
+            return cur.get(field)
+        if field in bm:
+            return bm.get(field)
+        return None
 
-    if i_ag is None or div_deg is None or y_pred is None:
+    i_val = to_float(pick_field(I_FIELD))
+    div_val = to_float(pick_field(DIV_FIELD))
+    y_val = to_float(pick_field(Y_FIELD))
+
+    if i_val is None or div_val is None or y_val is None:
         return (math.inf, math.inf, math.inf), {"reason": "missing_metrics"}
 
-    abs_y = abs(y_pred)
-    score = (-i_ag, div_deg, abs_y)
+    y_term = abs(y_val) if (os.environ.get("ST2_Y_ABS", "1").strip() != "0") else y_val
+
     info = {
-        "I_ag_out_A": i_ag,
-        "divergence_angle_deg": div_deg,
-        "y_mean_pred_500mm_m": y_pred,
-        "abs_y_mean_pred_500mm_m": abs_y,
+        "I_metric": i_val,
+        "DIV_metric": div_val,
+        "Y_metric": y_val,
+        "Y_term": y_term,
+        "I_field": I_FIELD,
+        "DIV_field": DIV_FIELD,
+        "Y_field": Y_FIELD,
         "lost_to_sidewalls": bool(coll.get("lost_to_sidewalls", False)),
     }
+
+    if SCORE_MODE == "weighted":
+        i_ref = I_REF if I_REF > 0.0 else 1.0
+        d_ref = DIV_REF if DIV_REF > 0.0 else 1.0
+        y_ref = Y_REF if Y_REF > 0.0 else 1.0
+        score = (-W_I * (i_val / i_ref)) + (W_DIV * (div_val / d_ref)) + (W_Y * (y_term / y_ref))
+        info.update({
+            "score_mode": "weighted",
+            "weights": {"I": W_I, "DIV": W_DIV, "Y": W_Y},
+            "refs": {"I": i_ref, "DIV": d_ref, "Y": y_ref},
+        })
+        return score, info
+
+    score = (-i_val, div_val, y_term)
+    info.update({"score_mode": "lex"})
     return score, info
 
 
@@ -1296,6 +1356,13 @@ def main():
         "history": hist_out,
         "keys": keys,
         "values": {k: [float(x) for x in vs] for k, vs in value_lists.items()},
+        "score_config": {
+            "mode": SCORE_MODE,
+            "fields": {"I": I_FIELD, "DIV": DIV_FIELD, "Y": Y_FIELD},
+            "weights": {"I": W_I, "DIV": W_DIV, "Y": W_Y},
+            "refs": {"I": I_REF, "DIV": DIV_REF, "Y": Y_REF},
+            "y_abs": (os.environ.get("ST2_Y_ABS", "1").strip() != "0"),
+        },
     }
     (outdir / "stage2_best.json").write_text(json.dumps(summary, indent=2))
     print(f"[stage2] done. Best score={fmt_score(best_score)}, summary at {outdir/'stage2_best.json'}", flush=True)
