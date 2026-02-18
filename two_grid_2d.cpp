@@ -760,6 +760,122 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                         I_ag_out_Apm, I_ag_out_A,
                         I_sm_Apm,     I_sm_A);
 
+            // ---- 2.1a Sample radial/diameter profile ----
+            {
+                const double sample_diam_m = envd("SAMPLE_DIAM_M", 6.35e-2);
+                const double sample_rad_m = 0.5 * sample_diam_m;
+                const double sample_bin_m = envd("SAMPLE_BIN_M", 5.0e-4);
+                const int allow_trunc_profile = envi("SAMPLE_PROFILE_ALLOW_TRUNC", 1);
+                const double x_profile_env = envd("SAMPLE_PROFILE_X_M", std::numeric_limits<double>::quiet_NaN());
+                const double x_profile_plane = std::isfinite(x_profile_env)
+                                                   ? x_profile_env
+                                                   : (endplate_enabled ? x_sm_plane : (xmax - 0.5*h));
+                const bool profile_ok = endplate_enabled || (allow_trunc_profile != 0);
+
+                if (profile_ok && sample_rad_m > 0.0 && sample_bin_m > 0.0 &&
+                    x_profile_plane > (xmin + 0.5*h) && x_profile_plane < (xmax - 0.5*h)) {
+                    TrajectoryDiagnosticData tdata;
+                    std::vector<trajectory_diagnostic_e> diag;
+                    diag.push_back(DIAG_Y);
+                    diag.push_back(DIAG_CURR);
+                    pdb.trajectories_at_plane(tdata, AXIS_X, x_profile_plane, diag);
+
+                    const std::vector<double> &y    = tdata(0).data();
+                    const std::vector<double> &curr = tdata(1).data();
+                    const size_t N = curr.size();
+
+                    const int nbins_r = (int)std::ceil(sample_rad_m / sample_bin_m);
+                    const int nbins_y = (int)std::ceil((2.0 * sample_rad_m) / sample_bin_m);
+                    if (nbins_r > 0 && nbins_y > 0) {
+                        std::vector<double> bin_curr_r(nbins_r, 0.0);
+                        std::vector<size_t> bin_cnt_r(nbins_r, 0);
+                        std::vector<double> bin_curr_y(nbins_y, 0.0);
+                        std::vector<size_t> bin_cnt_y(nbins_y, 0);
+                        double sum_curr = 0.0;
+
+                        for (size_t i = 0; i < N; ++i) {
+                            const double yy = y[i];
+                            const double r = std::fabs(yy);
+                            if (r > sample_rad_m) {
+                                continue;
+                            }
+                            const double w = curr[i];
+                            sum_curr += w;
+
+                            int idx_r = (int)std::floor(r / sample_bin_m);
+                            if (idx_r < 0) idx_r = 0;
+                            if (idx_r >= nbins_r) idx_r = nbins_r - 1;
+                            bin_curr_r[idx_r] += w;
+                            bin_cnt_r[idx_r] += 1;
+
+                            const double y0 = -sample_rad_m;
+                            int idx_y = (int)std::floor((yy - y0) / sample_bin_m);
+                            if (idx_y < 0) idx_y = 0;
+                            if (idx_y >= nbins_y) idx_y = nbins_y - 1;
+                            bin_curr_y[idx_y] += w;
+                            bin_cnt_y[idx_y] += 1;
+                        }
+
+                        std::ofstream pj(outdir + "/sample_radial_profile.json");
+                        pj << "{\n";
+                        pj << "  \"x_plane_m\": " << std::setprecision(10) << x_profile_plane << ",\n";
+                        pj << "  \"sample_diam_m\": " << std::setprecision(10) << sample_diam_m << ",\n";
+                        pj << "  \"sample_rad_m\": " << std::setprecision(10) << sample_rad_m << ",\n";
+                        pj << "  \"bin_width_m\": " << std::setprecision(10) << sample_bin_m << ",\n";
+                        pj << "  \"total_I_Apm\": " << std::setprecision(10) << sum_curr << ",\n";
+                        pj << "  \"total_I_A\": " << std::setprecision(10) << (sum_curr * Leff) << ",\n";
+                        pj << "  \"num_samples\": " << N << ",\n";
+                        pj << "  \"bins\": [\n";
+                        for (int b = 0; b < nbins_r; ++b) {
+                            const double r0 = b * sample_bin_m;
+                            const double r1 = (b + 1) * sample_bin_m;
+                            pj << "    {\"r_lo_m\": " << std::setprecision(10) << r0
+                               << ", \"r_hi_m\": " << std::setprecision(10) << r1
+                               << ", \"I_Apm\": " << std::setprecision(10) << bin_curr_r[b]
+                               << ", \"I_A\": " << std::setprecision(10) << (bin_curr_r[b] * Leff)
+                               << ", \"fraction\": ";
+                            if (sum_curr > 0.0) pj << std::setprecision(10) << (bin_curr_r[b] / sum_curr); else pj << "0";
+                            pj << ", \"count\": " << bin_cnt_r[b] << "}";
+                            if (b != nbins_r - 1) pj << ",";
+                            pj << "\n";
+                        }
+                        pj << "  ]\n";
+                        pj << "}\n";
+
+                        std::ofstream dj(outdir + "/sample_diameter_profile.json");
+                        dj << "{\n";
+                        dj << "  \"x_plane_m\": " << std::setprecision(10) << x_profile_plane << ",\n";
+                        dj << "  \"sample_diam_m\": " << std::setprecision(10) << sample_diam_m << ",\n";
+                        dj << "  \"sample_rad_m\": " << std::setprecision(10) << sample_rad_m << ",\n";
+                        dj << "  \"bin_width_m\": " << std::setprecision(10) << sample_bin_m << ",\n";
+                        dj << "  \"total_I_Apm\": " << std::setprecision(10) << sum_curr << ",\n";
+                        dj << "  \"total_I_A\": " << std::setprecision(10) << (sum_curr * Leff) << ",\n";
+                        dj << "  \"num_samples\": " << N << ",\n";
+                        dj << "  \"bins\": [\n";
+                        for (int b = 0; b < nbins_y; ++b) {
+                            const double y0 = -sample_rad_m + b * sample_bin_m;
+                            const double y1 = y0 + sample_bin_m;
+                            dj << "    {\"y_lo_m\": " << std::setprecision(10) << y0
+                               << ", \"y_hi_m\": " << std::setprecision(10) << y1
+                               << ", \"I_Apm\": " << std::setprecision(10) << bin_curr_y[b]
+                               << ", \"I_A\": " << std::setprecision(10) << (bin_curr_y[b] * Leff)
+                               << ", \"fraction\": ";
+                            if (sum_curr > 0.0) dj << std::setprecision(10) << (bin_curr_y[b] / sum_curr); else dj << "0";
+                            dj << ", \"count\": " << bin_cnt_y[b] << "}";
+                            if (b != nbins_y - 1) dj << ",";
+                            dj << "\n";
+                        }
+                        dj << "  ]\n";
+                        dj << "}\n";
+                    }
+                } else if (profile_ok &&
+                           (x_profile_plane <= (xmin + 0.5*h) || x_profile_plane >= (xmax - 0.5*h))) {
+                    std::fprintf(stderr,
+                                 "[beam] WARNING: sample profile plane out of bounds (x=%.6e m); skipping profile.\n",
+                                 x_profile_plane);
+                }
+            }
+
             // Deflection (centroid steering) between AG exit and right boundary of computed space.
             const double x_right_plane = endplate_enabled
                                              ? (g_tube_x1 - g_end_w - 0.5*h)
