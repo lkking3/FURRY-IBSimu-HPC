@@ -37,6 +37,7 @@ ARRAY_CONC=5
 # Results root & run name prefix
 RESULTS_DIR="${RESULTS_DIR:-$PWD/results}"
 RUN_PREFIX="two_grid_Convergence_Study_Idealized_Grid_offset"
+RUN_STAMP="${RUN_STAMP:-$(date +%Y%m%d_%H%M%S)}"
 
 # ---- Stage-1 verticality sampling knobs (passed to compute jobs) ----
 TRACE_ENABLE=0            # 0=metrics only; 1=also write CSV tracers
@@ -49,24 +50,30 @@ VERT_THRESH_DEG=2.0
 # ---- Base geometry (non-swept defaults) ----
 H=8e-5
 X_LEFT_M=2e-3
-X_RIGHT_M="${X_RIGHT_M:-0.06}"
+X_RIGHT_M="${X_RIGHT_M:-0.03}"
 # Physical tube/sample length used for envelope projection (can exceed X_RIGHT_M)
 X_RIGHT_PHYS_M="${X_RIGHT_PHYS_M:-0.55}"
 YBOX_M=0.086
-ACCEL_OFF_Y_M=0.0
-SCREEN_OFF_Y_M=0.0
+ACCEL_OFF_Y_M=0.0784
+SCREEN_OFF_Y_M=0.0784
 
 # Offset sweep controls (defaults = single value at the base offsets)
 ACCEL_OFF_START_M="${ACCEL_OFF_START_M:-$ACCEL_OFF_Y_M}"
-ACCEL_OFF_STEP_M="${ACCEL_OFF_STEP_M:-0.0}"
-ACCEL_OFF_COUNT="${ACCEL_OFF_COUNT:-1}"
-
+ACCEL_OFF_STEP_M="${ACCEL_OFF_STEP_M:-0.00005}"
+ACCEL_OFF_COUNT="${ACCEL_OFF_COUNT:-10}"
 # Potentials & downstream slices
 VS_V=0
 VA_V=-10000
 SAMPLE_V=$VA_V
 TUBE_WALL_T_M=0.0002
 SAMPLE_PLATE_T_M=0.0002
+SAMPLE_PROFILE_X_M="${SAMPLE_PROFILE_X_M:-}"
+
+# Auto-plot sample profile JSONs after each run
+PLOT_PROFILE="${PLOT_PROFILE:-0}"
+PLOT_PROFILE_Y="${PLOT_PROFILE_Y:-I_A}"
+PLOT_PROFILE_X_UNITS="${PLOT_PROFILE_X_UNITS:-mm}"
+PLOT_PROFILE_EXT="${PLOT_PROFILE_EXT:-png}"
 
 RUN_SOLVE=1
 WRITE_PNG=1
@@ -94,7 +101,7 @@ SC_FACTOR=${SC_FACTOR:-0.1} # 1.0 = full space charge, <1.0 = partially neutrali
 # =====================================================================================
 # Geometry
 AP_RAD_LIST=(0.0015)               # 0.001 0.0015 0.002 0.0025 0.003 0.0035 0.004 0.0045 0.005)
-GRID_T_LIST=(0.007)                #0.004 0.005 0.006 0.007 0.008 0.009 0.01)
+GRID_T_LIST=(0.006)                #0.004 0.005 0.006 0.007 0.008 0.009 0.01)
 GAP_LIST=(0.001)
 
 # Chamfers (8 independent controls)
@@ -133,7 +140,7 @@ RUN_STAGE2="${RUN_STAGE2:-1}"   # 0=no refine; 1=submit refine after reducer
 
 # FIX: set an explicit knob list. If you want auto-pick later, set OPT_KNOBS="".
 # (current default: chamfer-only tweaks)
-OPT_KNOBS="${OPT_KNOBS:-SCR_UP_DEPTH_M,SCR_UP_ANGLE_DEG,SCR_DN_DEPTH_M,SCR_DN_ANGLE_DEG,ACC_UP_DEPTH_M,ACC_UP_ANGLE_DEG,ACC_DN_DEPTH_M,ACC_DN_ANGLE_DEG}"
+OPT_KNOBS="${OPT_KNOBS:-ACC_UP_DEPTH_M,ACC_UP_ANGLE_DEG,ACC_DN_DEPTH_M,ACC_DN_ANGLE_DEG, ACCEL_OFF_Y_M}"
 
 # These are ignored when OPT_KNOBS is non-empty, but keep sane defaults:
 MAX_KNOBS="${MAX_KNOBS:-3}"
@@ -147,7 +154,7 @@ DELTA_FLOORS_JSON="${DELTA_FLOORS_JSON:-$(
   "AP_RAD_M":         2.0e-4,
   "GAP_M":            2.0e-4,
   "GRID_T_M":         1.0e-3,
-  "ACCEL_OFF_Y_M":    5.0e-4,
+  "ACCEL_OFF_Y_M":    0.00001,
   "SCREEN_OFF_Y_M":   5.0e-4,
   "SCR_UP_DEPTH_M":   5.0e-4,
   "SCR_DN_DEPTH_M":   5.0e-4,
@@ -208,6 +215,7 @@ export RUN_STAGE2 OPT_KNOBS MAX_KNOBS VERT_METRIC TOPK \
 PIPE_ROOT="$PWD/.pipeline_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$PIPE_ROOT"
 echo "[orchestrator] workspace: $PIPE_ROOT"
+cp -f plot_runlog_compact.py "$PIPE_ROOT/plot_runlog_compact.py"
 
 # ---------- helpers ----------
 arrlit(){ local -n A="$1"; printf "("; for v in "${A[@]}"; do printf " %s" "$v"; done; printf " )"; }
@@ -251,6 +259,7 @@ export VA_V=__VA_V__
 export SAMPLE_V=__SAMPLE_V__
 export TUBE_WALL_T_M=__TUBE_WALL_T_M__
 export SAMPLE_PLATE_T_M=__SAMPLE_PLATE_T_M__
+export SAMPLE_PROFILE_X_M=__SAMPLE_PROFILE_X_M__
 
 export RUN_SOLVE=__RUN_SOLVE__
 export WRITE_PNG=__WRITE_PNG__
@@ -266,6 +275,11 @@ export ION_J_SCALE=__ION_J_SCALE__
 export SC_FACTOR=__SC_FACTOR__
 export RESULTS_DIR="__RESULTS_DIR__"
 export RUN_PREFIX="__RUN_PREFIX__"
+export RUN_STAMP="__RUN_STAMP__"
+export PLOT_PROFILE=__PLOT_PROFILE__
+export PLOT_PROFILE_Y="__PLOT_PROFILE_Y__"
+export PLOT_PROFILE_X_UNITS="__PLOT_PROFILE_X_UNITS__"
+export PLOT_PROFILE_EXT="__PLOT_PROFILE_EXT__"
 
 export TRACE_ENABLE=__TRACE_ENABLE__
 export VERT_PAD_M=__VERT_PAD_M__
@@ -302,6 +316,7 @@ E_VA="$(sed_escape "$VA_V")"
 E_SAMP="$(sed_escape "$SAMPLE_V")"
 E_TW="$(sed_escape "$TUBE_WALL_T_M")"
 E_EP="$(sed_escape "$SAMPLE_PLATE_T_M")"
+E_SPX="$(sed_escape "${SAMPLE_PROFILE_X_M:-nan}")"
 E_RUNSOLVE="$(sed_escape "$RUN_SOLVE")"
 E_WRITEPNG="$(sed_escape "$WRITE_PNG")"
 E_PNGNAME="$(sed_escape "$PNG_NAME")"
@@ -309,6 +324,11 @@ E_CP="$(sed_escape "$CLOSE_PAD_M")"
 E_CB="$(sed_escape "$CLOSE_BASE_PX")"
 E_RDIR="$(sed_escape "$RESULTS_DIR")"
 E_RPFX="$(sed_escape "$RUN_PREFIX")"
+E_RSTAMP="$(sed_escape "$RUN_STAMP")"
+E_PPROF="$(sed_escape "$PLOT_PROFILE")"
+E_PPY="$(sed_escape "$PLOT_PROFILE_Y")"
+E_PPX="$(sed_escape "$PLOT_PROFILE_X_UNITS")"
+E_PPE="$(sed_escape "$PLOT_PROFILE_EXT")"
 E_TRACE="$(sed_escape "$TRACE_ENABLE")"
 E_VPAD="$(sed_escape "$VERT_PAD_M")"
 E_PFPX="$(sed_escape "$PLOT_FONT_PX")"
@@ -347,6 +367,7 @@ sed -i \
   -e "s#__SAMPLE_V__#${E_SAMP}#" \
   -e "s#__TUBE_WALL_T_M__#${E_TW}#" \
   -e "s#__SAMPLE_PLATE_T_M__#${E_EP}#" \
+  -e "s#__SAMPLE_PROFILE_X_M__#${E_SPX}#" \
   -e "s#__RUN_SOLVE__#${E_RUNSOLVE}#" \
   -e "s#__WRITE_PNG__#${E_WRITEPNG}#" \
   -e "s#__PNG_NAME__#${E_PNGNAME}#" \
@@ -355,6 +376,11 @@ sed -i \
   -e "s#__PLOT_FONT_PX__#${E_PFPX}#" \
   -e "s#__RESULTS_DIR__#${E_RDIR}#" \
   -e "s#__RUN_PREFIX__#${E_RPFX}#" \
+  -e "s#__RUN_STAMP__#${E_RSTAMP}#" \
+  -e "s#__PLOT_PROFILE__#${E_PPROF}#" \
+  -e "s#__PLOT_PROFILE_Y__#${E_PPY}#" \
+  -e "s#__PLOT_PROFILE_X_UNITS__#${E_PPX}#" \
+  -e "s#__PLOT_PROFILE_EXT__#${E_PPE}#" \
   -e "s#__TRACE_ENABLE__#${E_TRACE}#" \
   -e "s#__VERT_PAD_M__#${E_VPAD}#" \
   -e "s#__VERT_XLEN_M__#${E_VXLEN}#" \
@@ -448,6 +474,28 @@ export RUN_TAG="i${idx}_rad${rt}_t${gt}_gap${gp}_AO${ao}_SO${so}_SU(${suD},${suA
 
 echo "[$(date)] running..."
 srun --ntasks=1 "__PIPE_ROOT__/bin/two_grid_2d"
+
+# Optional: plot sample profile automatically
+if [[ "${PLOT_PROFILE:-1}" != "0" ]]; then
+  OUTDIR="${RESULTS_DIR}/${RUN_PREFIX}_${RUN_STAMP}"
+  if [[ -n "${RUN_TAG:-}" ]]; then OUTDIR="${OUTDIR}_${RUN_TAG}"; fi
+  if [[ -n "${SLURM_JOB_ID:-}" ]]; then OUTDIR="${OUTDIR}_j${SLURM_JOB_ID}"; fi
+
+  PROF_JSON="${OUTDIR}/sample_diameter_profile.json"
+  if [[ ! -f "${PROF_JSON}" ]]; then
+    PROF_JSON="${OUTDIR}/sample_radial_profile.json"
+  fi
+
+  if [[ -f "${PROF_JSON}" ]]; then
+    ext="${PLOT_PROFILE_EXT:-png}"
+    python3 "__PIPE_ROOT__/plot_runlog_compact.py" sample-profile \
+      --json "${PROF_JSON}" \
+      --out "${OUTDIR}/sample_profile.${ext}" \
+      --y "${PLOT_PROFILE_Y:-I_Apm}" \
+      --x-units "${PLOT_PROFILE_X_UNITS:-mm}" \
+      || echo "[plot] WARNING: failed to generate sample_profile.${ext}"
+  fi
+fi
 EOF_SWEEP
 
 # Robust replace for sweep resources/paths
@@ -815,6 +863,76 @@ def load_json(p: Path) -> Any:
     except Exception:
         return None
 
+PLOT_PROFILE = os.environ.get("PLOT_PROFILE", "1").strip() != "0"
+PLOT_PROFILE_Y = os.environ.get("PLOT_PROFILE_Y", "I_Apm").strip() or "I_Apm"
+PLOT_PROFILE_X_UNITS = os.environ.get("PLOT_PROFILE_X_UNITS", "mm").strip() or "mm"
+PLOT_PROFILE_EXT = os.environ.get("PLOT_PROFILE_EXT", "png").strip() or "png"
+PLOT_SCRIPT = PIPE_ROOT / "plot_runlog_compact.py"
+
+def plot_profile(run_dir: Path) -> None:
+    if not PLOT_PROFILE:
+        return
+    if not PLOT_SCRIPT.exists():
+        return
+    prof = run_dir / "sample_diameter_profile.json"
+    if not prof.exists():
+        prof = run_dir / "sample_radial_profile.json"
+    if not prof.exists():
+        return
+    out_html = run_dir / f"sample_profile.{PLOT_PROFILE_EXT}"
+    cmd = [
+        "python3",
+        str(PLOT_SCRIPT),
+        "sample-profile",
+        "--json",
+        str(prof),
+        "--out",
+        str(out_html),
+        "--y",
+        PLOT_PROFILE_Y,
+        "--x-units",
+        PLOT_PROFILE_X_UNITS,
+    ]
+    try:
+        subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+CHAMFER_PAIRS = [
+    ("SCR_UP_DEPTH_M", "SCR_UP_ANGLE_DEG"),
+    ("SCR_DN_DEPTH_M", "SCR_DN_ANGLE_DEG"),
+    ("ACC_UP_DEPTH_M", "ACC_UP_ANGLE_DEG"),
+    ("ACC_DN_DEPTH_M", "ACC_DN_ANGLE_DEG"),
+]
+EPS_ZERO = 1.0e-12
+
+def is_zero(v: float) -> bool:
+    return abs(v) <= EPS_ZERO
+
+def is_valid_chamfer(vals: Dict[str, float]) -> bool:
+    for dkey, akey in CHAMFER_PAIRS:
+        if dkey not in vals or akey not in vals:
+            continue
+        d = float(vals[dkey])
+        a = float(vals[akey])
+        if is_zero(d) ^ is_zero(a):
+            return False
+    return True
+
+def closest_index(vals: List[float], want_zero: bool) -> int:
+    idx = None
+    best = None
+    for i, v in enumerate(vals):
+        v = float(v)
+        if want_zero and not is_zero(v):
+            continue
+        if not want_zero and is_zero(v):
+            continue
+        score = abs(v)
+        if best is None or score < best:
+            best = score
+            idx = i
+    return -1 if idx is None else idx
+
 def to_float(v: Any) -> Any:
     try:
         f = float(v)
@@ -960,6 +1078,8 @@ def evaluate_candidate(tag: str, knob_vals: Dict[str, float]) -> Tuple[Tuple[flo
     """
     Launch and wait for a candidate, then read its metrics and score it.
     """
+    if not is_valid_chamfer(knob_vals):
+        return (math.inf, math.inf, math.inf), {"reason": "invalid_chamfer", "tag": tag, "knobs": knob_vals}
     proc = launch_candidate(tag, knob_vals)
     ret = proc.wait()
     if ret != 0:
@@ -968,6 +1088,7 @@ def evaluate_candidate(tag: str, knob_vals: Dict[str, float]) -> Tuple[Tuple[flo
 
     rdir = make_run_dir(tag)
     score, info = score_run(rdir)
+    plot_profile(rdir)
     info["run_dir"] = str(rdir)
     info["tag"] = tag
     info["knobs"] = {k: float(v) for k, v in knob_vals.items()}
@@ -985,7 +1106,28 @@ def coordinate_neighbors(
     Returns a list of new idx_map dicts.
     """
     nbrs: List[Dict[str, int]] = []
+    handled = set()
+
+    # For chamfer pairs, vary depth+angle together so we don't generate invalid no-op cases.
+    for dkey, akey in CHAMFER_PAIRS:
+        if dkey in idx_map and akey in idx_map:
+            handled.add(dkey)
+            handled.add(akey)
+            dvals = value_lists[dkey]
+            avals = value_lists[akey]
+            for di in range(len(dvals)):
+                for ai in range(len(avals)):
+                    if di == idx_map[dkey] and ai == idx_map[akey]:
+                        continue
+                    nm = dict(idx_map)
+                    nm[dkey] = di
+                    nm[akey] = ai
+                    nbrs.append(nm)
+
+    # Other knobs vary one at a time.
     for k in keys:
+        if k in handled:
+            continue
         vals = value_lists[k]
         cur_idx = idx_map[k]
         for j in range(len(vals)):
@@ -1026,6 +1168,34 @@ def main():
             continue
         idx_map[k] = n // 2  # for triplets, this is the center
 
+    # Repair seed indices if they imply a no-op chamfer (depth=0 or angle=0 only).
+    for dkey, akey in CHAMFER_PAIRS:
+        if dkey not in idx_map or akey not in idx_map:
+            continue
+        dvals = value_lists[dkey]
+        avals = value_lists[akey]
+        d = float(dvals[idx_map[dkey]])
+        a = float(avals[idx_map[akey]])
+        if is_zero(d) ^ is_zero(a):
+            if is_zero(d):
+                # Prefer no-chamfer if angle has a zero entry; otherwise force depth non-zero.
+                ai = closest_index(avals, want_zero=True)
+                if ai >= 0:
+                    idx_map[akey] = ai
+                else:
+                    di = closest_index(dvals, want_zero=False)
+                    if di >= 0:
+                        idx_map[dkey] = di
+            else:
+                # Angle is zero, depth non-zero.
+                di = closest_index(dvals, want_zero=True)
+                if di >= 0:
+                    idx_map[dkey] = di
+                else:
+                    ai = closest_index(avals, want_zero=False)
+                    if ai >= 0:
+                        idx_map[akey] = ai
+
     def materialize(map_idx: Dict[str, int]) -> Dict[str, float]:
         return {k: value_lists[k][map_idx[k]] for k in keys if k in map_idx}
 
@@ -1033,7 +1203,11 @@ def main():
     best_idx = dict(idx_map)
     best_vals = materialize(best_idx)
     best_tag = "s2_seed"
-    best_score, best_info = evaluate_candidate(best_tag, best_vals)
+    if not is_valid_chamfer(best_vals):
+        best_score = (math.inf, math.inf, math.inf)
+        best_info = {"reason": "invalid_chamfer_seed", "knobs": best_vals}
+    else:
+        best_score, best_info = evaluate_candidate(best_tag, best_vals)
     print(f"[stage2] initial best: score={fmt_score(best_score)} tag={best_tag}", flush=True)
 
     history = []
@@ -1045,6 +1219,7 @@ def main():
         print(f"[stage2] iteration {it}", flush=True)
 
         neighbors = coordinate_neighbors(keys, value_lists, best_idx)
+        neighbors = [nm for nm in neighbors if is_valid_chamfer(materialize(nm))]
         if not neighbors:
             print("[stage2] no neighbors to explore; stopping.")
             break
@@ -1081,6 +1256,7 @@ def main():
                 else:
                     rdir = make_run_dir(tag)
                     score, info = score_run(rdir)
+                    plot_profile(rdir)
                     info["run_dir"] = str(rdir)
                     info["tag"] = tag
                     info["knobs"] = vals
@@ -1191,7 +1367,7 @@ IFS=',' read -r -a KNOBS <<< "${OPT_KNOBS:-}"
 for K in "${KNOBS[@]}"; do
   K=$(echo "$K" | xargs)
   case "$K" in
-    SCR_UP_DEPTH_M|SCR_DN_DEPTH_M|ACC_UP_DEPTH_M|ACC_DN_DEPTH_M|SCR_UP_ANGLE_DEG|SCR_DN_ANGLE_DEG|ACC_UP_ANGLE_DEG|ACC_DN_ANGLE_DEG)
+    SCR_UP_DEPTH_M|SCR_DN_DEPTH_M|ACC_UP_DEPTH_M|ACC_DN_DEPTH_M|SCR_UP_ANGLE_DEG|SCR_DN_ANGLE_DEG|ACC_UP_ANGLE_DEG|ACC_DN_ANGLE_DEG|ACCEL_OFF_Y_M)
       add_list "$K" "${!K}"
       ;;
     *) echo "[refine] WARNING: unknown knob '$K' ignored";;
@@ -1210,15 +1386,21 @@ export ACCEL_OFF_Y_M="${ACCEL_OFF_Y_M:-__ACCEL_OFF_Y_M__}" SCREEN_OFF_Y_M="${SCR
 export X_RIGHT_PHYS_M="__X_RIGHT_PHYS_M__"
 export VS_V="__VS_V__" VA_V="__VA_V__" SAMPLE_V="__SAMPLE_V__"
 export TUBE_WALL_T_M="__TUBE_WALL_T_M__" SAMPLE_PLATE_T_M="__SAMPLE_PLATE_T_M__"
+export SAMPLE_PROFILE_X_M="__SAMPLE_PROFILE_X_M__"
 export RUN_SOLVE="__RUN_SOLVE__" WRITE_PNG="__WRITE_PNG__" PNG_NAME="__PNG_NAME__"
 export CLOSE_PAD_M="__CLOSE_PAD_M__" CLOSE_BASE_PX="__CLOSE_BASE_PX__"
 export RESULTS_DIR="__RESULTS_DIR__" RUN_PREFIX="two_grid_refine"
+export RUN_STAMP="__RUN_STAMP__"
 export PIPE_ROOT="__PIPE_ROOT__"
 export ENABLE_IONS="__ENABLE_IONS__"
 export PLASMA_NI_M3="__PLASMA_NI_M3__"
 export PLASMA_TE_EV="__PLASMA_TE_EV__"
 export TRACE_ENABLE="0" VERT_PAD_M="__VERT_PAD_M__" VERT_XLEN_M="__VERT_XLEN_M__"
 export VERT_YPAD_M="__VERT_YPAD_M__" VERT_STEP_M="__VERT_STEP_M__" VERT_THRESH_DEG="__VERT_THRESH_DEG__"
+export PLOT_PROFILE="__PLOT_PROFILE__"
+export PLOT_PROFILE_Y="__PLOT_PROFILE_Y__"
+export PLOT_PROFILE_X_UNITS="__PLOT_PROFILE_X_UNITS__"
+export PLOT_PROFILE_EXT="__PLOT_PROFILE_EXT__"
 
 
 # Pack LISTS into env for python
@@ -1230,7 +1412,7 @@ export REFINE_DUMP="$DUMP"
 if [[ "${STAGE2_MODE:-smart}" == "grid" ]]; then
   echo "[refine] STAGE2_MODE=grid -> using legacy Cartesian grid search."
   python3 - <<'PY'
-import os, itertools, subprocess
+import os, itertools, subprocess, time
 dump=os.environ.get("REFINE_DUMP","{}").strip("{}")
 d={}
 if dump and dump!="{}":
@@ -1248,6 +1430,67 @@ if not keys:
 else:
     combos=[dict(zip(keys,vals)) for vals in itertools.product(*[d[k] for k in keys])]
 print(f"[refine] combos: {len(combos)} over knobs {keys}")
+def is_zero(v):
+    try:
+        return abs(float(v)) <= 1.0e-12
+    except Exception:
+        return False
+
+def valid_chamfer(combo):
+    pairs = [
+        ("SCR_UP_DEPTH_M","SCR_UP_ANGLE_DEG"),
+        ("SCR_DN_DEPTH_M","SCR_DN_ANGLE_DEG"),
+        ("ACC_UP_DEPTH_M","ACC_UP_ANGLE_DEG"),
+        ("ACC_DN_DEPTH_M","ACC_DN_ANGLE_DEG"),
+    ]
+    for dkey, akey in pairs:
+        if dkey in combo and akey in combo:
+            d = combo[dkey]; a = combo[akey]
+            if is_zero(d) ^ is_zero(a):
+                return False
+    return True
+
+combos = [c for c in combos if valid_chamfer(c)]
+print(f"[refine] combos after chamfer filter: {len(combos)}")
+
+def predict_outdir(tag):
+    base = os.environ.get("RESULTS_DIR", "./results")
+    prefix = os.environ.get("RUN_PREFIX", "run")
+    stamp = os.environ.get("RUN_STAMP", "").strip()
+    if not stamp:
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+    name = f"{prefix}_{stamp}"
+    if tag:
+        name += f"_{tag}"
+    jobid = os.environ.get("SLURM_JOB_ID", "")
+    if jobid:
+        name += f"_j{jobid}"
+    return os.path.join(base, name)
+
+def plot_profile(tag):
+    if os.environ.get("PLOT_PROFILE", "1").strip() == "0":
+        return
+    pipe_root = os.environ.get("PIPE_ROOT", ".")
+    script = os.path.join(pipe_root, "plot_runlog_compact.py")
+    if not os.path.exists(script):
+        return
+    outdir = predict_outdir(tag)
+    prof = os.path.join(outdir, "sample_diameter_profile.json")
+    if not os.path.exists(prof):
+        prof = os.path.join(outdir, "sample_radial_profile.json")
+    if not os.path.exists(prof):
+        return
+    ext = os.environ.get("PLOT_PROFILE_EXT", "png")
+    out_html = os.path.join(outdir, f"sample_profile.{ext}")
+    y = os.environ.get("PLOT_PROFILE_Y", "I_Apm")
+    xunits = os.environ.get("PLOT_PROFILE_X_UNITS", "mm")
+    cmd = ["python3", script, "sample-profile", "--json", prof, "--out", out_html,
+           "--y", y, "--x-units", xunits]
+    try:
+        subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
 for i,combo in enumerate(combos):
     env=os.environ.copy()
     tag="ref_i{}".format(i)
@@ -1256,6 +1499,7 @@ for i,combo in enumerate(combos):
     env["RUN_TAG"]=tag
     print("[refine] running", tag)
     subprocess.check_call(["srun","--ntasks=1","__PIPE_ROOT__/bin/two_grid_2d"], env=env)
+    plot_profile(tag)
 PY
 else
   echo "[refine] STAGE2_MODE=${STAGE2_MODE:-smart} -> using stage2_opt.py controller."
@@ -1272,6 +1516,7 @@ fill_ref2 ACCEL_OFF_Y_M "$ACCEL_OFF_Y_M"; fill_ref2 SCREEN_OFF_Y_M "$SCREEN_OFF_
 fill_ref2 X_RIGHT_PHYS_M "$X_RIGHT_PHYS_M"
 fill_ref2 VS_V "$VS_V";         fill_ref2 VA_V "$VA_V";          fill_ref2 SAMPLE_V "$SAMPLE_V"
 fill_ref2 TUBE_WALL_T_M "$TUBE_WALL_T_M"; fill_ref2 SAMPLE_PLATE_T_M "$SAMPLE_PLATE_T_M"
+fill_ref2 SAMPLE_PROFILE_X_M "${SAMPLE_PROFILE_X_M:-nan}"
 fill_ref2 RUN_SOLVE "$RUN_SOLVE"; fill_ref2 WRITE_PNG "$WRITE_PNG"; fill_ref2 PNG_NAME "$PNG_NAME"
 fill_ref2 CLOSE_PAD_M "$CLOSE_PAD_M"; fill_ref2 CLOSE_BASE_PX "$CLOSE_BASE_PX"
 fill_ref2 VERT_PAD_M "$VERT_PAD_M";   fill_ref2 VERT_XLEN_M "$VERT_XLEN_M"
@@ -1280,6 +1525,11 @@ fill_ref2 PIPE_ROOT "$PIPE_ROOT"
 fill_ref2 ENABLE_IONS "$ENABLE_IONS_STAGE2"
 fill_ref2 PLASMA_NI_M3 "$PLASMA_NI_M3"
 fill_ref2 PLASMA_TE_EV "$PLASMA_TE_EV"
+fill_ref2 RUN_STAMP "$RUN_STAMP"
+fill_ref2 PLOT_PROFILE "$PLOT_PROFILE"
+fill_ref2 PLOT_PROFILE_Y "$PLOT_PROFILE_Y"
+fill_ref2 PLOT_PROFILE_X_UNITS "$PLOT_PROFILE_X_UNITS"
+fill_ref2 PLOT_PROFILE_EXT "$PLOT_PROFILE_EXT"
 fi
 
 
