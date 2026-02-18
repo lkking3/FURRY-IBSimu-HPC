@@ -67,7 +67,7 @@ VA_V=-10000
 SAMPLE_V=$VA_V
 TUBE_WALL_T_M=0.0002
 SAMPLE_PLATE_T_M=0.0002
-SAMPLE_PROFILE_X_M="${SAMPLE_PROFILE_X_M:-}"
+SAMPLE_PROFILE_X_M="${SAMPLE_PROFILE_X_M:-0.03}"
 
 # Auto-plot sample profile JSONs after each run
 PLOT_PROFILE="${PLOT_PROFILE:-0}"
@@ -187,7 +187,7 @@ ST2_SEED="${ST2_SEED:-42069}"                # RNG seed (0 = deterministic per c
 
 # Stage-2 scoring configuration
 # mode: lex (tuple ordering) or weighted (single scalar)
-ST2_SCORE_MODE="${ST2_SCORE_MODE:-lex}"
+ST2_SCORE_MODE="${ST2_SCORE_MODE:-weighted}"
 ST2_I_FIELD="${ST2_I_FIELD:-I_ag_out_A}"
 ST2_DIV_FIELD="${ST2_DIV_FIELD:-divergence_angle_deg}"
 ST2_Y_FIELD="${ST2_Y_FIELD:-y_mean_pred_500mm_m}"
