@@ -50,7 +50,7 @@ VERT_THRESH_DEG=2.0
 # ---- Base geometry (non-swept defaults) ----
 H=8e-5
 X_LEFT_M=2e-3
-X_RIGHT_M="${X_RIGHT_M:-0.03}"
+X_RIGHT_M="${X_RIGHT_M:-0.02}"
 # Physical tube/sample length used for envelope projection (can exceed X_RIGHT_M)
 X_RIGHT_PHYS_M="${X_RIGHT_PHYS_M:-0.55}"
 YBOX_M=0.086
@@ -188,9 +188,9 @@ ST2_SEED="${ST2_SEED:-42069}"                # RNG seed (0 = deterministic per c
 # Stage-2 scoring configuration
 # mode: lex (tuple ordering) or weighted (single scalar)
 ST2_SCORE_MODE="${ST2_SCORE_MODE:-weighted}"
-ST2_I_FIELD="${ST2_I_FIELD:-I_ag_out_A}"
-ST2_DIV_FIELD="${ST2_DIV_FIELD:-divergence_angle_deg}"
-ST2_Y_FIELD="${ST2_Y_FIELD:-y_mean_pred_500mm_m}"
+ST2_I_FIELD="${ST2_I_FIELD:-currents.I_ag_out_A|I_ag_out_A}"
+ST2_DIV_FIELD="${ST2_DIV_FIELD:-DIVERGENCE_ANGLE_DEG|divergence_angle_deg}"
+ST2_Y_FIELD="${ST2_Y_FIELD:-deflection.y_mean_pred_500mm_m|y_mean_pred_500mm_m|deflection.y_mean_right_m}"
 ST2_W_I="${ST2_W_I:-0.5}"
 ST2_W_DIV="${ST2_W_DIV:-0.1}"
 ST2_W_Y="${ST2_W_Y:-1.0}"
@@ -815,7 +815,7 @@ cat > "$PIPE_ROOT/stage2_opt.py" <<'PY'
 #!/usr/bin/env python3
 import os, json, time, math, subprocess, random
 from pathlib import Path
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 
 # --- Environment & basic paths ---
 RESULTS = Path(os.environ.get("RESULTS_DIR", "./results"))
@@ -1009,30 +1009,47 @@ def score_run(run_dir: Path) -> Tuple[Any, Dict[str, Any]]:
     defl = (bm.get("deflection") or {})
     cur = (bm.get("currents") or {})
 
-    def pick_field(field: str) -> Any:
-        if not field:
-            return None
-        if "." in field:
-            sect, key = field.split(".", 1)
-            if sect == "deflection":
-                return defl.get(key)
-            if sect == "currents":
-                return cur.get(key)
-            return bm.get(field)
-        if field in defl:
-            return defl.get(field)
-        if field in cur:
-            return cur.get(field)
-        if field in bm:
-            return bm.get(field)
-        return None
+    def pick_field(field_spec: str) -> Tuple[Optional[float], Optional[str]]:
+        if not field_spec:
+            return None, None
+        for field in field_spec.split("|"):
+            field = field.strip()
+            if not field:
+                continue
+            if "." in field:
+                sect, key = field.split(".", 1)
+                if sect == "deflection":
+                    val = defl.get(key)
+                elif sect == "currents":
+                    val = cur.get(key)
+                else:
+                    val = bm.get(field)
+            elif field in defl:
+                val = defl.get(field)
+            elif field in cur:
+                val = cur.get(field)
+            elif field in bm:
+                val = bm.get(field)
+            else:
+                val = None
+            f = to_float(val)
+            if f is not None:
+                return f, field
+        return None, None
 
-    i_val = to_float(pick_field(I_FIELD))
-    div_val = to_float(pick_field(DIV_FIELD))
-    y_val = to_float(pick_field(Y_FIELD))
+    i_val, i_used = pick_field(I_FIELD)
+    div_val, div_used = pick_field(DIV_FIELD)
+    y_val, y_used = pick_field(Y_FIELD)
 
     if i_val is None or div_val is None or y_val is None:
-        return (math.inf, math.inf, math.inf), {"reason": "missing_metrics"}
+        missing = []
+        if i_val is None:
+            missing.append(f"I:{I_FIELD}")
+        if div_val is None:
+            missing.append(f"DIV:{DIV_FIELD}")
+        if y_val is None:
+            missing.append(f"Y:{Y_FIELD}")
+        return (math.inf, math.inf, math.inf), {"reason": "missing_metrics", "missing": missing}
 
     y_term = abs(y_val) if (os.environ.get("ST2_Y_ABS", "1").strip() != "0") else y_val
 
@@ -1040,6 +1057,9 @@ def score_run(run_dir: Path) -> Tuple[Any, Dict[str, Any]]:
         "I_metric": i_val,
         "DIV_metric": div_val,
         "Y_metric": y_val,
+        "I_used": i_used,
+        "DIV_used": div_used,
+        "Y_used": y_used,
         "Y_term": y_term,
         "I_field": I_FIELD,
         "DIV_field": DIV_FIELD,
