@@ -116,6 +116,8 @@ def extract_geom(meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     acc = meta.get("accel_chamfer") or {}
     for k in [
         "AP_RAD_M",
+        "SCREEN_AP_RAD_M",
+        "ACCEL_AP_RAD_M",
         "GRID_T_M",
         "GAP_M",
         "ACCEL_OFF_Y_M",
@@ -163,6 +165,8 @@ def collect_rows(root: Path):
         acc = m.get("accel_chamfer") or {}
         feat = {
             "AP_RAD_M": m.get("AP_RAD_M"),
+            "SCREEN_AP_RAD_M": m.get("SCREEN_AP_RAD_M"),
+            "ACCEL_AP_RAD_M": m.get("ACCEL_AP_RAD_M"),
             "GRID_T_M": m.get("GRID_T_M"),
             "GAP_M": m.get("GAP_M"),
             "ACCEL_OFF_Y_M": m.get("ACCEL_OFF_Y_M"),
