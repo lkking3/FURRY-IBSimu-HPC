@@ -65,9 +65,10 @@ IDENTITY_COLS = [
 
 ASSIGNED_COLS = [
     "VS_V","VA_V","SAMPLE_V",
-    "H","AP_RAD_M","GRID_T_M","GAP_M","ACCEL_OFF_Y_M","SCREEN_OFF_Y_M",
+    "H","AP_RAD_M","SCREEN_AP_RAD_M","ACCEL_AP_RAD_M","GRID_T_M","GAP_M","ACCEL_OFF_Y_M","SCREEN_OFF_Y_M",
     "X_LEFT_M","X_RIGHT_M","X_RIGHT_PHYS_M","TRUNCATED_DRIFT","YBOX_M",
     "TUBE_X_START_M","TUBE_X_END_M","TUBE_WALL_T_M","SAMPLE_PLATE_T_M",
+    "APERTURE_MIRROR","N_APERTURES","APERTURE_PAIRS_M",
     "SCR_UP_DEPTH_M","SCR_UP_ANGLE_DEG","SCR_DN_DEPTH_M","SCR_DN_ANGLE_DEG",
     "ACC_UP_DEPTH_M","ACC_UP_ANGLE_DEG","ACC_DN_DEPTH_M","ACC_DN_ANGLE_DEG",
     "ENABLE_IONS","ION_ITER_MAX","ION_M_AMU","ION_TP_EV","ION_TT_EV",
@@ -126,8 +127,9 @@ def extract_row(run_dir: Path, results_dir: Path) -> Dict[str, Any]:
     row["RUN_TAG"]   = meta.get("RUN_TAG")
     row["RUN_STAMP"] = meta.get("RUN_STAMP")
 
-    for k in ["VS_V","VA_V","SAMPLE_V","H","AP_RAD_M","GRID_T_M","GAP_M","ACCEL_OFF_Y_M","SCREEN_OFF_Y_M",
-              "X_LEFT_M","X_RIGHT_M","X_RIGHT_PHYS_M","TRUNCATED_DRIFT","YBOX_M"]:
+    for k in ["VS_V","VA_V","SAMPLE_V","H","AP_RAD_M","SCREEN_AP_RAD_M","ACCEL_AP_RAD_M","GRID_T_M","GAP_M","ACCEL_OFF_Y_M","SCREEN_OFF_Y_M",
+              "X_LEFT_M","X_RIGHT_M","X_RIGHT_PHYS_M","TRUNCATED_DRIFT","YBOX_M",
+              "APERTURE_MIRROR","N_APERTURES","APERTURE_PAIRS_M"]:
         if k in meta:
             row[k] = meta.get(k)
 
