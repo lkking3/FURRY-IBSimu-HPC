@@ -54,13 +54,16 @@ X_RIGHT_M="${X_RIGHT_M:-0.02}"
 # Physical tube/sample length used for envelope projection (can exceed X_RIGHT_M)
 X_RIGHT_PHYS_M="${X_RIGHT_PHYS_M:-0.55}"
 YBOX_M=0.086
-ACCEL_OFF_Y_M=0.0784
+ACCEL_OFF_Y_M=0.07875
 SCREEN_OFF_Y_M=0.0784
+SPLIT_AP_RAD="${SPLIT_AP_RAD:-1}"
+APERTURE_PAIRS_M="${APERTURE_PAIRS_M:-}"
+APERTURE_MIRROR="${APERTURE_MIRROR:-0}"
 
 # Offset sweep controls (defaults = single value at the base offsets)
 ACCEL_OFF_START_M="${ACCEL_OFF_START_M:-$ACCEL_OFF_Y_M}"
 ACCEL_OFF_STEP_M="${ACCEL_OFF_STEP_M:-0.00005}"
-ACCEL_OFF_COUNT="${ACCEL_OFF_COUNT:-10}"
+ACCEL_OFF_COUNT="${ACCEL_OFF_COUNT:-1}"
 # Potentials & downstream slices
 VS_V=0
 VA_V=-10000
@@ -101,6 +104,8 @@ SC_FACTOR=${SC_FACTOR:-0.0005} # 1.0 = full space charge, <1.0 = partially neutr
 # =====================================================================================
 # Geometry
 AP_RAD_LIST=(0.0015)               # 0.001 0.0015 0.002 0.0025 0.003 0.0035 0.004 0.0045 0.005)
+SCREEN_AP_RAD_LIST=(0.0015)        # used when SPLIT_AP_RAD=1
+ACCEL_AP_RAD_LIST=(0.0016 0.0017 0.0018)         # used when SPLIT_AP_RAD=1
 GRID_T_LIST=(0.005)                #0.004 0.005 0.006 0.007 0.008 0.009 0.01)
 GAP_LIST=(0.001)
 
@@ -111,8 +116,8 @@ SCR_DN_DEPTH_LIST=(0.0) #0.002 0.003 0.004)
 SCR_DN_ANGLE_LIST=(0) #20 45)
 ACC_UP_DEPTH_LIST=(0.0) #0.002 0.003 0.004)
 ACC_UP_ANGLE_LIST=(0) #20 45)
-ACC_DN_DEPTH_LIST=(0.0)
-ACC_DN_ANGLE_LIST=(0.0)
+ACC_DN_DEPTH_LIST=(0.0026)
+ACC_DN_ANGLE_LIST=(5)
 
 # Offset sweeps
 make_seq() {
@@ -152,6 +157,8 @@ DELTA_FLOORS_JSON="${DELTA_FLOORS_JSON:-$(
   cat <<'JSON'
 {
   "AP_RAD_M":         2.0e-4,
+  "SCREEN_AP_RAD_M":  2.0e-4,
+  "ACCEL_AP_RAD_M":   2.0e-4,
   "GAP_M":            2.0e-4,
   "GRID_T_M":         1.0e-3,
   "ACCEL_OFF_Y_M":    0.00001,
@@ -249,6 +256,8 @@ cat > "$PIPE_ROOT/sweep_lists.env" <<'EOF_ENV'
 # Populated by orchestrator.
 
 AP_RAD_LIST=__AP_RAD_LIST__
+SCREEN_AP_RAD_LIST=__SCREEN_AP_RAD_LIST__
+ACCEL_AP_RAD_LIST=__ACCEL_AP_RAD_LIST__
 GRID_T_LIST=__GRID_T_LIST__
 GAP_LIST=__GAP_LIST__
 SCR_UP_DEPTH_LIST=__SCR_UP_DEPTH_LIST__
@@ -268,6 +277,9 @@ export X_RIGHT_PHYS_M=__X_RIGHT_PHYS_M__
 export YBOX_M=__YBOX_M__
 export ACCEL_OFF_Y_M=__ACCEL_OFF_Y_M__
 export SCREEN_OFF_Y_M=__SCREEN_OFF_Y_M__
+export SPLIT_AP_RAD=__SPLIT_AP_RAD__
+export APERTURE_PAIRS_M="__APERTURE_PAIRS_M__"
+export APERTURE_MIRROR=__APERTURE_MIRROR__
 
 export VS_V=__VS_V__
 export VA_V=__VA_V__
@@ -306,6 +318,8 @@ EOF_ENV
 
 # Pre-escape lists
 AP_R="$(arrlit_escaped AP_RAD_LIST)"
+AP_RS="$(arrlit_escaped SCREEN_AP_RAD_LIST)"
+AP_RA="$(arrlit_escaped ACCEL_AP_RAD_LIST)"
 GR_T="$(arrlit_escaped GRID_T_LIST)"
 GAP_L="$(arrlit_escaped GAP_LIST)"
 SU_D="$(arrlit_escaped SCR_UP_DEPTH_LIST)"
@@ -326,6 +340,9 @@ E_XRP="$(sed_escape "$X_RIGHT_PHYS_M")"
 E_YB="$(sed_escape "$YBOX_M")"
 E_OFF="$(sed_escape "$ACCEL_OFF_Y_M")"
 E_SOFF="$(sed_escape "$SCREEN_OFF_Y_M")"
+E_APPAIR="$(sed_escape "$APERTURE_PAIRS_M")"
+E_APMIR="$(sed_escape "$APERTURE_MIRROR")"
+E_SPLITRAD="$(sed_escape "$SPLIT_AP_RAD")"
 E_VS="$(sed_escape "$VS_V")"
 E_VA="$(sed_escape "$VA_V")"
 E_SAMP="$(sed_escape "$SAMPLE_V")"
@@ -359,6 +376,8 @@ E_SCF="$(sed_escape "$SC_FACTOR")"
 
 sed -i \
   -e "s#__AP_RAD_LIST__#${AP_R}#" \
+  -e "s#__SCREEN_AP_RAD_LIST__#${AP_RS}#" \
+  -e "s#__ACCEL_AP_RAD_LIST__#${AP_RA}#" \
   -e "s#__GRID_T_LIST__#${GR_T}#" \
   -e "s#__GAP_LIST__#${GAP_L}#" \
   -e "s#__SCR_UP_DEPTH_LIST__#${SU_D}#" \
@@ -377,6 +396,9 @@ sed -i \
   -e "s#__YBOX_M__#${E_YB}#" \
   -e "s#__ACCEL_OFF_Y_M__#${E_OFF}#" \
   -e "s#__SCREEN_OFF_Y_M__#${E_SOFF}#" \
+  -e "s#__SPLIT_AP_RAD__#${E_SPLITRAD}#" \
+  -e "s#__APERTURE_PAIRS_M__#${E_APPAIR}#" \
+  -e "s#__APERTURE_MIRROR__#${E_APMIR}#" \
   -e "s#__VS_V__#${E_VS}#" \
   -e "s#__VA_V__#${E_VA}#" \
   -e "s#__SAMPLE_V__#${E_SAMP}#" \
@@ -414,12 +436,16 @@ sed -i \
 source "$PIPE_ROOT/sweep_lists.env"
 
 len(){ local -n A="$1"; echo "${#A[@]}"; }
-nR=$(len AP_RAD_LIST); nT=$(len GRID_T_LIST); nG=$(len GAP_LIST)
+nR=$(len AP_RAD_LIST); nRS=$(len SCREEN_AP_RAD_LIST); nRA=$(len ACCEL_AP_RAD_LIST)
+nT=$(len GRID_T_LIST); nG=$(len GAP_LIST)
 nSUd=$(len SCR_UP_DEPTH_LIST); nSUa=$(len SCR_UP_ANGLE_LIST)
 nSDd=$(len SCR_DN_DEPTH_LIST); nSDa=$(len SCR_DN_ANGLE_LIST)
 nAUd=$(len ACC_UP_DEPTH_LIST); nAUa=$(len ACC_UP_ANGLE_LIST)
 nADd=$(len ACC_DN_DEPTH_LIST); nADa=$(len ACC_DN_ANGLE_LIST)
 nAO=$(len ACCEL_OFF_LIST)
+if [[ "${SPLIT_AP_RAD:-0}" == "1" ]]; then
+  nR=$(( nRS * nRA ))
+fi
 TOTAL=$(( nR*nT*nG*nSUd*nSUa*nSDd*nSDa*nAUd*nAUa*nADd*nADa*nAO ))
 echo "[orchestrator] Stage-1 total combinations = $TOTAL"
 
@@ -451,7 +477,12 @@ pick(){ local idx="$1"; shift; local arr=( "$@" ); echo "${arr[$idx]}"; }
 idx=${SLURM_ARRAY_TASK_ID:?}
 idx=$(( idx + ${ARRAY_BASE:-0} ))
 i=$idx
-iR=$(( i % ${#AP_RAD_LIST[@]} ));  i=$(( i / ${#AP_RAD_LIST[@]} ))
+if [[ "${SPLIT_AP_RAD:-0}" == "1" ]]; then
+  iRS=$(( i % ${#SCREEN_AP_RAD_LIST[@]} ));  i=$(( i / ${#SCREEN_AP_RAD_LIST[@]} ))
+  iRA=$(( i % ${#ACCEL_AP_RAD_LIST[@]} ));   i=$(( i / ${#ACCEL_AP_RAD_LIST[@]} ))
+else
+  iR=$(( i % ${#AP_RAD_LIST[@]} ));  i=$(( i / ${#AP_RAD_LIST[@]} ))
+fi
 iT=$(( i % ${#GRID_T_LIST[@]} ));  i=$(( i / ${#GRID_T_LIST[@]} ))
 iG=$(( i % ${#GAP_LIST[@]} ));     i=$(( i / ${#GAP_LIST[@]} ))
 iSUd=$(( i % ${#SCR_UP_DEPTH_LIST[@]} )); i=$(( i / ${#SCR_UP_DEPTH_LIST[@]} ))
@@ -464,7 +495,15 @@ iADd=$(( i % ${#ACC_DN_DEPTH_LIST[@]} )); i=$(( i / ${#ACC_DN_DEPTH_LIST[@]} ))
 iADa=$(( i % ${#ACC_DN_ANGLE_LIST[@]} )); i=$(( i / ${#ACC_DN_ANGLE_LIST[@]} ))
 iAO=$(( i % ${#ACCEL_OFF_LIST[@]} ))
 
-export AP_RAD_M=$(pick "$iR"  "${AP_RAD_LIST[@]}")
+if [[ "${SPLIT_AP_RAD:-0}" == "1" ]]; then
+  export SCREEN_AP_RAD_M=$(pick "$iRS"  "${SCREEN_AP_RAD_LIST[@]}")
+  export ACCEL_AP_RAD_M=$(pick "$iRA"   "${ACCEL_AP_RAD_LIST[@]}")
+  export AP_RAD_M="$SCREEN_AP_RAD_M"
+else
+  export AP_RAD_M=$(pick "$iR"  "${AP_RAD_LIST[@]}")
+  export SCREEN_AP_RAD_M="$AP_RAD_M"
+  export ACCEL_AP_RAD_M="$AP_RAD_M"
+fi
 export GRID_T_M=$(pick "$iT"  "${GRID_T_LIST[@]}")
 export GAP_M=$(pick "$iG"     "${GAP_LIST[@]}")
 export SCR_UP_DEPTH_M=$(pick "$iSUd" "${SCR_UP_DEPTH_LIST[@]}")
@@ -479,13 +518,20 @@ export ACCEL_OFF_Y_M=$(pick "$iAO" "${ACCEL_OFF_LIST[@]}")
 
 sanitize(){ echo "$1" | sed -e 's/\./p/g' -e 's/-/m/g'; }
 rt=$(sanitize "$AP_RAD_M"); gt=$(sanitize "$GRID_T_M"); gp=$(sanitize "$GAP_M")
+if [[ "${SPLIT_AP_RAD:-0}" == "1" ]]; then
+  rs=$(sanitize "$SCREEN_AP_RAD_M")
+  ra=$(sanitize "$ACCEL_AP_RAD_M")
+  rtag="radS${rs}_radA${ra}"
+else
+  rtag="rad${rt}"
+fi
 suD=$(sanitize "$SCR_UP_DEPTH_M"); suA=$(sanitize "$SCR_UP_ANGLE_DEG")
 sdD=$(sanitize "$SCR_DN_DEPTH_M"); sdA=$(sanitize "$SCR_DN_ANGLE_DEG")
 auD=$(sanitize "$ACC_UP_DEPTH_M");  auA=$(sanitize "$ACC_UP_ANGLE_DEG")
 adD=$(sanitize "$ACC_DN_DEPTH_M");  adA=$(sanitize "$ACC_DN_ANGLE_DEG")
 ao=$(sanitize "$ACCEL_OFF_Y_M");    so=$(sanitize "$SCREEN_OFF_Y_M")
 
-export RUN_TAG="i${idx}_rad${rt}_t${gt}_gap${gp}_AO${ao}_SO${so}_SU(${suD},${suA})_SD(${sdD},${sdA})_AU(${auD},${auA})_AD(${adD},${adA})"
+export RUN_TAG="i${idx}_${rtag}_t${gt}_gap${gp}_AO${ao}_SO${so}_SU(${suD},${suA})_SD(${sdD},${sdA})_AU(${auD},${auA})_AD(${adD},${adA})"
 
 echo "[$(date)] running..."
 srun --ntasks=1 "__PIPE_ROOT__/bin/two_grid_2d"
@@ -608,7 +654,8 @@ def extract_geom(meta):
     scr=meta.get("screen_chamfer") or {}
     acc=meta.get("accel_chamfer") or {}
     out.update({k:meta.get(k) for k in [
-        "AP_RAD_M","GRID_T_M","GAP_M","ACCEL_OFF_Y_M","SCREEN_OFF_Y_M","H","X_LEFT_M","X_RIGHT_M","YBOX_M",
+        "AP_RAD_M","SCREEN_AP_RAD_M","ACCEL_AP_RAD_M","GRID_T_M","GAP_M",
+        "ACCEL_OFF_Y_M","SCREEN_OFF_Y_M","H","X_LEFT_M","X_RIGHT_M","YBOX_M",
         "VS_V","VA_V","SAMPLE_V"
     ] if k in meta})
     out.update({
@@ -1471,6 +1518,8 @@ fi
 # Base env for two_grid_2d
 export H="__H__" X_LEFT_M="__X_LEFT_M__" X_RIGHT_M="__X_RIGHT_M__" YBOX_M="__YBOX_M__"
 export ACCEL_OFF_Y_M="${ACCEL_OFF_Y_M:-__ACCEL_OFF_Y_M__}" SCREEN_OFF_Y_M="${SCREEN_OFF_Y_M:-__SCREEN_OFF_Y_M__}"
+export APERTURE_PAIRS_M="__APERTURE_PAIRS_M__"
+export APERTURE_MIRROR="__APERTURE_MIRROR__"
 export X_RIGHT_PHYS_M="__X_RIGHT_PHYS_M__"
 export VS_V="__VS_V__" VA_V="__VA_V__" SAMPLE_V="__SAMPLE_V__"
 export TUBE_WALL_T_M="__TUBE_WALL_T_M__" SAMPLE_PLATE_T_M="__SAMPLE_PLATE_T_M__"
@@ -1601,6 +1650,7 @@ fill_ref2() { sed -i -e "s#__$1__#$(sed_escape "$2")#" "$PIPE_ROOT/refine_stage2
 fill_ref2 RESULTS_DIR "$RESULTS_DIR"
 fill_ref2 H "$H";               fill_ref2 X_LEFT_M "$X_LEFT_M";  fill_ref2 X_RIGHT_M "$X_RIGHT_M"; fill_ref2 YBOX_M "$YBOX_M"
 fill_ref2 ACCEL_OFF_Y_M "$ACCEL_OFF_Y_M"; fill_ref2 SCREEN_OFF_Y_M "$SCREEN_OFF_Y_M"
+fill_ref2 APERTURE_PAIRS_M "$APERTURE_PAIRS_M"; fill_ref2 APERTURE_MIRROR "$APERTURE_MIRROR"
 fill_ref2 X_RIGHT_PHYS_M "$X_RIGHT_PHYS_M"
 fill_ref2 VS_V "$VS_V";         fill_ref2 VA_V "$VA_V";          fill_ref2 SAMPLE_V "$SAMPLE_V"
 fill_ref2 TUBE_WALL_T_M "$TUBE_WALL_T_M"; fill_ref2 SAMPLE_PLATE_T_M "$SAMPLE_PLATE_T_M"
