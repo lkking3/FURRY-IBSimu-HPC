@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cmath>
 #include <cstring>
+#include <cctype>
 #include <iostream>
 #include <algorithm>
 #include <string>
@@ -81,6 +82,26 @@ static std::string envs(const char* k, const char* defv = nullptr) {
     return defv ? std::string(defv) : std::string();
 }
 
+static bool parse_double_str(const std::string &s, double &out) {
+    char *e = nullptr;
+    out = std::strtod(s.c_str(), &e);
+    return (e && *e == '\0');
+}
+
+static void split_tokens(const std::string &s, std::vector<std::string> &out) {
+    std::string cur;
+    for (char c : s) {
+        if (c == ',' || c == ';') {
+            if (!cur.empty()) out.push_back(cur);
+            cur.clear();
+            continue;
+        }
+        if (std::isspace(static_cast<unsigned char>(c))) continue;
+        cur.push_back(c);
+    }
+    if (!cur.empty()) out.push_back(cur);
+}
+
 // mkdir -p helpers
 static int mkdir_one(const std::string &p) {
     if (p.empty()) return 0;
@@ -132,13 +153,16 @@ static std::string add_suffix_before_ext(const std::string &path, const std::str
 
 
 // ---------- globals for FuncSolid ----------
-static double g_a        = 0.0;   // base aperture radius [m]
+static double g_a_scr    = 0.0;   // screen aperture radius [m]
+static double g_a_acc    = 0.0;   // accel  aperture radius [m]
 static double g_xs0      = 0.0;   // screen start x
 static double g_xs1      = 0.0;   // screen end x
 static double g_xa0      = 0.0;   // accel start x
 static double g_xa1      = 0.0;   // accel end x
 static double g_off      = 0.0;   // accelerator aperture y-offset [m]
 static double g_scr_off  = 0.0;   // screen aperture y-offset [m]
+static std::vector<double> g_acc_offs;
+static std::vector<double> g_scr_offs;
 
 // screen chamfers (upstream & downstream)
 static double g_scr_du = 0.0, g_scr_mu = 0.0; // depth & slope upstream
@@ -168,7 +192,7 @@ static inline void clamp_biface(double t, double &du, double &dd, bool &scaled) 
 
 // half-height of open slot (aperture) as function of x inside each plate
 static inline double screen_a_eff(double x) {
-    double ae = g_a;
+    double ae = g_a_scr;
     // upstream face at x = g_xs0, chamfer zone: [xs0, xs0+du]
     if (g_scr_du > 0.0 && g_scr_mu > 0.0) {
         const double xu_end = g_xs0 + g_scr_du;
@@ -182,7 +206,7 @@ static inline double screen_a_eff(double x) {
     return ae;
 }
 static inline double accel_a_eff(double x) {
-    double ae = g_a;
+    double ae = g_a_acc;
     // upstream face at x = g_xa0, chamfer zone: [xa0, xa0+du]
     if (g_acc_du > 0.0 && g_acc_mu > 0.0) {
         const double xu_end = g_xa0 + g_acc_du;
@@ -196,13 +220,20 @@ static inline double accel_a_eff(double x) {
     return ae;
 }
 
+static inline bool in_any_aperture(double y, const std::vector<double> &offs, double a_eff) {
+    for (double off : offs) {
+        if (std::fabs(y - off) < a_eff) return true;
+    }
+    return false;
+}
+
 // --------- solids: grids ----------
 static bool screen_fn(double x, double y, double /*z*/) {
-    if (x >= g_xs0 && x <= g_xs1) return (std::fabs(y - g_scr_off) >= screen_a_eff(x));
+    if (x >= g_xs0 && x <= g_xs1) return !in_any_aperture(y, g_scr_offs, screen_a_eff(x));
     return false;
 }
 static bool accel_fn(double x, double y, double /*z*/) {
-    if (x >= g_xa0 && x <= g_xa1) return (std::fabs(y - g_off) >= accel_a_eff(x));
+    if (x >= g_xa0 && x <= g_xa1) return !in_any_aperture(y, g_acc_offs, accel_a_eff(x));
     return false;
 }
 
@@ -236,7 +267,8 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
 
     // ----- base geometry (env overrides) -----
     const double h        = envd("H",             1.0e-4);
-    const double a        = envd("AP_RAD_M",      1.0e-3);
+    const double a_scr    = envd("SCREEN_AP_RAD_M", envd("AP_RAD_M", 1.0e-3));
+    const double a_acc    = envd("ACCEL_AP_RAD_M",  a_scr);
     const double t        = envd("GRID_T_M",      5.0e-4);
     const double gap      = envd("GAP_M",         3.0e-3);
     const double x_left   = envd("X_LEFT_M",      2.0e-3);
@@ -245,6 +277,60 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
     const bool truncated_drift = (x_right + 1.0e-12 < x_right_phys);
     const double off_y    = envd("ACCEL_OFF_Y_M", 0.0);
     const double scr_off_y = envd("SCREEN_OFF_Y_M", envd("PG_OFF_Y_M", 0.0));
+
+    // ----- multi-aperture offsets (paired screen:accel list) -----
+    const std::string pairs_raw = envs("APERTURE_PAIRS_M", "");
+    const int mirror_pairs = envi("APERTURE_MIRROR", 0);
+    std::vector<std::pair<double, double>> ap_pairs;
+    auto add_pair = [&](double s, double a) {
+        const double eps = 1.0e-12;
+        for (const auto &p : ap_pairs) {
+            if (std::fabs(p.first - s) <= eps && std::fabs(p.second - a) <= eps) {
+                return;
+            }
+        }
+        ap_pairs.emplace_back(s, a);
+    };
+
+    if (!pairs_raw.empty()) {
+        std::vector<std::string> toks;
+        split_tokens(pairs_raw, toks);
+        for (const auto &tok : toks) {
+            const size_t pos = tok.find(':');
+            if (pos == std::string::npos) continue;
+            const std::string s0 = tok.substr(0, pos);
+            const std::string s1 = tok.substr(pos + 1);
+            double s = 0.0, a = 0.0;
+            if (parse_double_str(s0, s) && parse_double_str(s1, a)) {
+                add_pair(s, a);
+            }
+        }
+    }
+
+    if (ap_pairs.empty()) {
+        add_pair(scr_off_y, off_y);
+    }
+
+    if (mirror_pairs && !pairs_raw.empty()) {
+        const double eps = 1.0e-12;
+        const size_t n0 = ap_pairs.size();
+        for (size_t i = 0; i < n0; ++i) {
+            const double s = ap_pairs[i].first;
+            const double a = ap_pairs[i].second;
+            if (std::fabs(s) <= eps && std::fabs(a) <= eps) continue;
+            add_pair(-s, -a);
+        }
+    }
+
+    std::vector<double> scr_off_list;
+    std::vector<double> acc_off_list;
+    scr_off_list.reserve(ap_pairs.size());
+    acc_off_list.reserve(ap_pairs.size());
+    for (const auto &p : ap_pairs) {
+        scr_off_list.push_back(p.first);
+        acc_off_list.push_back(p.second);
+    }
+    const int N_APERTURES = (int)ap_pairs.size();
 
     // ----- electrical potentials -----
     const double VS_V     = envd("VS_V", 0.0);   // screen potential [V]
@@ -298,7 +384,7 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
     const double amu  = 1.66053906660e-27;     // [kg]
     const double q_C  = std::fabs(ION_Q_E) * qe;
     const double m_kg = std::fabs(ION_M_AMU) * amu;
-    const double A_ap_m2 = M_PI * a * a;
+    const double A_ap_m2 = M_PI * a_scr * a_scr;
 
     double P_CL_A_per_V32 = 0.0;
     double I_CL_A = 0.0;
@@ -307,9 +393,9 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
         I_CL_A = P_CL_A_per_V32 * V32;
     }
 
-    const double N_beamlets_est = estimate_beamlet_count(a);
-    const double P_CL_sys_A_per_V32 = P_CL_A_per_V32 * N_beamlets_est;
-    const double I_CL_sys_A = I_CL_A * N_beamlets_est;
+    const double N_beamlets_sim = (N_APERTURES > 0) ? (double)N_APERTURES : 1.0;
+    const double P_CL_sys_A_per_V32 = P_CL_A_per_V32 * N_beamlets_sim;
+    const double I_CL_sys_A = I_CL_A * N_beamlets_sim;
 
     // Record key plasma/beam tuning knobs in meta.json even when ions are disabled (for provenance).
     const double PLASMA_NI_M3_META = envd("PLASMA_NI_M3", 5.0e18);
@@ -334,11 +420,16 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
     const double acc_md = std::tan(deg2rad(std::max(acc_da, 0.0)));
 
     // Push globals
-    g_a = a;
+    g_a_scr = a_scr;
+    g_a_acc = a_acc;
     g_xs0 = xs0; g_xs1 = xs1;
     g_xa0 = xa0; g_xa1 = xa1;
-    g_off = off_y;
-    g_scr_off = scr_off_y;
+    if (acc_off_list.empty()) acc_off_list.push_back(off_y);
+    if (scr_off_list.empty()) scr_off_list.push_back(scr_off_y);
+    g_off = acc_off_list.front();
+    g_scr_off = scr_off_list.front();
+    g_acc_offs = acc_off_list;
+    g_scr_offs = scr_off_list;
 
     g_scr_du = scr_du; g_scr_mu = scr_mu;
     g_scr_dd = scr_dd; g_scr_md = scr_md;
@@ -347,8 +438,11 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
 
     // Tube/endplate sizing
     const double max_delta = std::max({ scr_du*scr_mu, scr_dd*scr_md, acc_du*acc_mu, acc_dd*acc_md });
-    const double off_abs   = std::max(std::fabs(off_y), std::fabs(scr_off_y));
-    const double ybox_def  = std::max(3.0*(a + max_delta) + off_abs, 5.0e-3);
+    const double a_max = std::max(a_scr, a_acc);
+    double off_abs = 0.0;
+    for (double v : acc_off_list) off_abs = std::max(off_abs, std::fabs(v));
+    for (double v : scr_off_list) off_abs = std::max(off_abs, std::fabs(v));
+    const double ybox_def  = std::max(3.0*(a_max + max_delta) + off_abs, 5.0e-3);
     g_ybox = envd("YBOX_M", ybox_def);
 
     // Domain extents
@@ -438,11 +532,28 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
 
         // Geometry & domain
         m << "  \"H\":" << h << ",\n";
-        m << "  \"AP_RAD_M\":" << a << ",\n";
+        m << "  \"AP_RAD_M\":" << a_scr << ",\n";
+        m << "  \"SCREEN_AP_RAD_M\":" << a_scr << ",\n";
+        m << "  \"ACCEL_AP_RAD_M\":" << a_acc << ",\n";
         m << "  \"GRID_T_M\":" << t << ",\n";
         m << "  \"GAP_M\":" << gap << ",\n";
-        m << "  \"ACCEL_OFF_Y_M\":" << off_y << ",\n";
-        m << "  \"SCREEN_OFF_Y_M\":" << scr_off_y << ",\n";
+        m << "  \"ACCEL_OFF_Y_M\":" << g_off << ",\n";
+        m << "  \"SCREEN_OFF_Y_M\":" << g_scr_off << ",\n";
+        m << "  \"APERTURE_PAIRS_M\":\"" << pairs_raw << "\",\n";
+        m << "  \"APERTURE_MIRROR\":" << (mirror_pairs ? "true" : "false") << ",\n";
+        m << "  \"N_APERTURES\":" << N_APERTURES << ",\n";
+        {
+            auto write_list = [&](const char *key, const std::vector<double> &vals) {
+                m << "  \"" << key << "\":[";
+                for (size_t i = 0; i < vals.size(); ++i) {
+                    m << std::setprecision(10) << vals[i];
+                    if (i + 1 < vals.size()) m << ", ";
+                }
+                m << "],\n";
+            };
+            write_list("SCREEN_OFF_LIST_M", g_scr_offs);
+            write_list("ACCEL_OFF_LIST_M", g_acc_offs);
+        }
         m << "  \"X_LEFT_M\":" << x_left << ",\n";
         m << "  \"X_RIGHT_M\":" << x_right << ",\n";
         m << "  \"X_RIGHT_PHYS_M\":" << x_right_phys << ",\n";
@@ -497,7 +608,7 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
           << ", \"m_kg\":" << m_kg
           << ", \"P_CL_A_per_V32\":" << P_CL_A_per_V32
           << ", \"I_CL_A\":" << I_CL_A
-          << ", \"N_beamlets_est\":" << N_beamlets_est
+          << ", \"N_beamlets_sim\":" << N_beamlets_sim
           << ", \"P_CL_sys_A_per_V32\":" << P_CL_sys_A_per_V32
           << ", \"I_CL_sys_A\":" << I_CL_sys_A
           << "},\n";
@@ -519,6 +630,13 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                 xs0,xs1,scr_du,scr_ua,scr_dd,scr_da);
     std::printf("accel : x=[%g,%g]  up(depth=%g,ang=%g)  dn(depth=%g,ang=%g)\n",
                 xa0,xa1,acc_du,acc_ua,acc_dd,acc_da);
+    std::printf("aperture radii: screen=%g accel=%g\n", a_scr, a_acc);
+    std::printf("apertures: %d (mirror=%d)\n", N_APERTURES, mirror_pairs);
+    std::printf("aperture_pairs_m:");
+    for (size_t i = 0; i < ap_pairs.size(); ++i) {
+        std::printf(" %g:%g", ap_pairs[i].first, ap_pairs[i].second);
+    }
+    std::printf("\n");
     if (scr_scaled) std::printf("NOTE: screen chamfers scaled to fit thickness\n");
     if (acc_scaled) std::printf("NOTE: accel  chamfers scaled to fit thickness\n");
     std::printf("tube walls: x=[%g,%g]  wall_t=%g  endplate_t=%g\n",
@@ -614,8 +732,8 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
 
             // Beam start line: just upstream of the screen aperture, across its open height
             const double x_emit = std::max(xmin + 2.0*h, xs0 - 2.0*h);
-            const double y_lo   = scr_off_y - a;
-            const double y_hi   = scr_off_y + a;
+            const int n_ap = std::max(1, (int)g_scr_offs.size());
+            const int n_part_per = std::max(1, ION_NPART / n_ap);
 
             // Injection energy: potential drop between plasma and accel side
             const double E0_ev  = std::max(1.0, std::fabs(PLASMA_UP_V - VA_V));
@@ -625,17 +743,21 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                 efield.recalculate();
 
                 pdb.clear();
-                pdb.add_2d_beam_with_energy(
-                    (uint32_t)ION_NPART,
-                    J_Apm2,        // current density [A/m^2]
-                    ION_Q_E,
-                    ION_M_AMU,
-                    E0_ev,         // beam energy [eV]
-                    ION_TP_EV,     // parallel temperature [eV]
-                    ION_TT_EV,     // transverse temperature [eV]
-                    x_emit, y_lo,  // start of emission line
-                    x_emit, y_hi   // end of emission line
-                );
+                for (double off : g_scr_offs) {
+                    const double y_lo = off - a_scr;
+                    const double y_hi = off + a_scr;
+                    pdb.add_2d_beam_with_energy(
+                        (uint32_t)n_part_per,
+                        J_Apm2,        // current density [A/m^2]
+                        ION_Q_E,
+                        ION_M_AMU,
+                        E0_ev,         // beam energy [eV]
+                        ION_TP_EV,     // parallel temperature [eV]
+                        ION_TT_EV,     // transverse temperature [eV]
+                        x_emit, y_lo,  // start of emission line
+                        x_emit, y_hi   // end of emission line
+                    );
+                }
                 pdb.iterate_trajectories(scharge, efield, bfield);
 
                 // Emulate partial neutralization in the drift
@@ -672,7 +794,7 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             }
             // ====== Beam diagnostics: currents + collimation ======
             // Only meaningful when ions are enabled and pdb is populated.
-            const double Leff = 0.785 * (2.0 * a);
+            const double Leff = 0.785 * (2.0 * a_scr);
             // Helper: total current and basic width at a given x-plane
 
             auto current_and_width_at_plane = [&](double xpos,
@@ -680,7 +802,8 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                                                 double &y_mean,
                                                 double &y_rms0,
                                                 double &y_rms_c,
-                                                double &y_absmax) {
+                                                double &y_absmax,
+                                                double &y_absmax_c) {
                 TrajectoryDiagnosticData tdata;
                 std::vector<trajectory_diagnostic_e> diag;
                 diag.push_back(DIAG_Y);
@@ -697,6 +820,7 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                 y_rms0   = 0.0;
                 y_rms_c  = 0.0;
                 y_absmax = 0.0;
+                y_absmax_c = 0.0;
 
                 const size_t N = curr.size();
                 double sum_wy = 0.0;
@@ -717,10 +841,15 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                     y_rms0 = std::sqrt(sum_wy2 / Itot);
                     const double var = (sum_wy2 / Itot) - (y_mean * y_mean);
                     y_rms_c = (var > 0.0) ? std::sqrt(var) : 0.0;
+                    for (size_t i = 0; i < N; ++i) {
+                        const double dy = std::fabs(y[i] - y_mean);
+                        if (dy > y_absmax_c) y_absmax_c = dy;
+                    }
                 } else {
                     y_mean = 0.0;
                     y_rms0 = 0.0;
                     y_rms_c = 0.0;
+                    y_absmax_c = 0.0;
                 }
             };
 
@@ -736,15 +865,15 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             const double x_sm_plane = endplate_enabled ? (g_tube_x1 - g_end_w - 0.5*h)
                                                      : std::numeric_limits<double>::quiet_NaN();
 
-            double I_pg_in_Apm  = 0.0, ymean_pg = 0.0, yr_pg  = 0.0, yr_pg_c  = 0.0, ymax_pg  = 0.0;
-            double I_ag_out_Apm = 0.0, ymean_ag = 0.0, yr_ag  = 0.0, yr_ag_c  = 0.0, ymax_ag  = 0.0;
-            double I_sm_Apm     = 0.0, ymean_sm = 0.0, yr_sm  = 0.0, yr_sm_c  = 0.0, ymax_sm  = 0.0;
+            double I_pg_in_Apm  = 0.0, ymean_pg = 0.0, yr_pg  = 0.0, yr_pg_c  = 0.0, ymax_pg  = 0.0, ymax_pg_c  = 0.0;
+            double I_ag_out_Apm = 0.0, ymean_ag = 0.0, yr_ag  = 0.0, yr_ag_c  = 0.0, ymax_ag  = 0.0, ymax_ag_c  = 0.0;
+            double I_sm_Apm     = 0.0, ymean_sm = 0.0, yr_sm  = 0.0, yr_sm_c  = 0.0, ymax_sm  = 0.0, ymax_sm_c  = 0.0;
 
-            current_and_width_at_plane(x_pg_plane, I_pg_in_Apm,  ymean_pg,  yr_pg,  yr_pg_c,  ymax_pg);
-            current_and_width_at_plane(x_ag_plane, I_ag_out_Apm, ymean_ag, yr_ag,  yr_ag_c,  ymax_ag);
+            current_and_width_at_plane(x_pg_plane, I_pg_in_Apm,  ymean_pg,  yr_pg,  yr_pg_c,  ymax_pg, ymax_pg_c);
+            current_and_width_at_plane(x_ag_plane, I_ag_out_Apm, ymean_ag, yr_ag,  yr_ag_c,  ymax_ag, ymax_ag_c);
             if (endplate_enabled) {
 
-                current_and_width_at_plane(x_sm_plane, I_sm_Apm, ymean_sm, yr_sm, yr_sm_c, ymax_sm);
+                current_and_width_at_plane(x_sm_plane, I_sm_Apm, ymean_sm, yr_sm, yr_sm_c, ymax_sm, ymax_sm_c);
 
             }
             // 3D estimates in amps using Leff
@@ -880,10 +1009,10 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             const double x_right_plane = endplate_enabled
                                              ? (g_tube_x1 - g_end_w - 0.5*h)
                                              : (xmax - 0.5*h);
-            double I_right_Apm = 0.0, ymean_right = 0.0, yr_right = 0.0, yr_right_c = 0.0, ymax_right = 0.0;
+            double I_right_Apm = 0.0, ymean_right = 0.0, yr_right = 0.0, yr_right_c = 0.0, ymax_right = 0.0, ymax_right_c = 0.0;
             bool have_right_plane = false;
             if (x_right_plane > x_ag_plane + 2.0*h) {
-                current_and_width_at_plane(x_right_plane, I_right_Apm, ymean_right, yr_right, yr_right_c, ymax_right);
+                current_and_width_at_plane(x_right_plane, I_right_Apm, ymean_right, yr_right, yr_right_c, ymax_right, ymax_right_c);
                 have_right_plane = (I_right_Apm > 0.0);
             }
 
@@ -891,15 +1020,20 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             double y_mean_pred_400mm_m = std::numeric_limits<double>::quiet_NaN();
             double y_mean_pred_500mm_m = std::numeric_limits<double>::quiet_NaN();
             double y_mean_pred_600mm_m = std::numeric_limits<double>::quiet_NaN();
+            double ymean_slope = std::numeric_limits<double>::quiet_NaN();
+            bool   have_steer = false;
 
             if (have_right_plane && I_ag_out_Apm > 0.0) {
                 const double dx = x_right_plane - x_ag_plane;
                 if (dx > 0.0) {
-                    const double slope = (ymean_right - ymean_ag) / dx;
-                    steer_angle_deg = rad2deg(std::atan(slope));
-                    y_mean_pred_400mm_m = ymean_ag + slope * 0.4;
-                    y_mean_pred_500mm_m = ymean_ag + slope * 0.5;
-                    y_mean_pred_600mm_m = ymean_ag + slope * 0.6;
+                    ymean_slope = (ymean_right - ymean_ag) / dx;
+                    have_steer = std::isfinite(ymean_slope);
+                    if (have_steer) {
+                        steer_angle_deg = rad2deg(std::atan(ymean_slope));
+                        y_mean_pred_400mm_m = ymean_ag + ymean_slope * 0.4;
+                        y_mean_pred_500mm_m = ymean_ag + ymean_slope * 0.5;
+                        y_mean_pred_600mm_m = ymean_ag + ymean_slope * 0.6;
+                    }
                 }
             }
 
@@ -920,8 +1054,8 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                 const double s  = (Nplanes > 1) ? double(ip) / double(Nplanes - 1) : 0.0;
                 const double xp = x_start + s * (x_end - x_start);
 
-                double I_plane = 0.0, ymean = 0.0, yr = 0.0, yr_c = 0.0, ymax = 0.0;
-                current_and_width_at_plane(xp, I_plane, ymean, yr, yr_c, ymax);
+                double I_plane = 0.0, ymean = 0.0, yr = 0.0, yr_c = 0.0, ymax = 0.0, ymax_c = 0.0;
+                current_and_width_at_plane(xp, I_plane, ymean, yr, yr_c, ymax, ymax_c);
 
                 if (I_plane <= 0.0)
                     continue;  // no trajectories crossing here
@@ -941,8 +1075,8 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             // This lets us truncate the simulated drift (X_RIGHT_M) while still estimating
             // whether the beam will hit the tube wall further downstream.
             //
-            // Model (simple, robust): r'' = K_eff / r, where r is the *RMS* radius and
-            // K_eff is inferred from 3 RMS samples just after the accel grid exit.
+            // Model (simple, robust): r'' = K_eff / r, where r is the *centered RMS* radius and
+            // K_eff is inferred from 3 centered-RMS samples just after the accel grid exit.
             // -------------------------------------------------------------------------
             bool   env_ok        = false;
             std::string env_reason;
@@ -1003,20 +1137,20 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                     const double x1 = x0 + dx_probe;
                     const double x2 = x1 + dx_probe;
 
-                    double I0_Apm=0.0, y0_mean=0.0, r0=0.0, r0c=0.0, a0=0.0;
-                    double I1_Apm=0.0, y1_mean=0.0, r1=0.0, r1c=0.0, a1=0.0;
-                    double I2_Apm=0.0, y2_mean=0.0, r2=0.0, r2c=0.0, a2=0.0;
+                    double I0_Apm=0.0, y0_mean=0.0, r0=0.0, r0c=0.0, a0=0.0, a0c=0.0;
+                    double I1_Apm=0.0, y1_mean=0.0, r1=0.0, r1c=0.0, a1=0.0, a1c=0.0;
+                    double I2_Apm=0.0, y2_mean=0.0, r2=0.0, r2c=0.0, a2=0.0, a2c=0.0;
 
-                    current_and_width_at_plane(x0, I0_Apm, y0_mean, r0, r0c, a0);
-                    current_and_width_at_plane(x1, I1_Apm, y1_mean, r1, r1c, a1);
-                    current_and_width_at_plane(x2, I2_Apm, y2_mean, r2, r2c, a2);
+                    current_and_width_at_plane(x0, I0_Apm, y0_mean, r0, r0c, a0, a0c);
+                    current_and_width_at_plane(x1, I1_Apm, y1_mean, r1, r1c, a1, a1c);
+                    current_and_width_at_plane(x2, I2_Apm, y2_mean, r2, r2c, a2, a2c);
 
-                    if( I0_Apm <= 0.0 || r0 <= 0.0 ||
-                        !std::isfinite(r0) || !std::isfinite(r1) || !std::isfinite(r2) ) {
+                    if( I0_Apm <= 0.0 || r0c <= 0.0 ||
+                        !std::isfinite(r0c) || !std::isfinite(r1c) || !std::isfinite(r2c) ) {
                         env_reason = "insufficient beam at probe planes";
                     } else {
-                        const double rp0  = (r1 - r0) / dx_probe;
-                        const double rpp0 = (r2 - 2.0*r1 + r0) / (dx_probe*dx_probe);
+                        const double rp0  = (r1c - r0c) / dx_probe;
+                        const double rpp0 = (r2c - 2.0*r1c + r0c) / (dx_probe*dx_probe);
 
                         // Average divergence angle from *centered* RMS growth rate.
                         const double rp_avg = (r2c - r0c) / (2.0*dx_probe);
@@ -1025,12 +1159,12 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                             div_angle_deg = rad2deg(std::atan(rp_use));
                         }
 
-                        double K_eff = r0 * rpp0;
+                        double K_eff = r0c * rpp0;
                         if( !std::isfinite(K_eff) ) K_eff = 0.0;
                         if( K_eff < 0.0 ) K_eff = 0.0; // clamp: we only model divergence here
 
-                        // Convert RMS -> "footprint" using the measured ratio absmax/RMS at x0.
-                        double abs_ratio = (a0 > 0.0 && r0 > 0.0) ? (a0 / r0) : 0.0;
+                        // Convert centered RMS -> "footprint" using measured absmax(centered)/RMS(centered) at x0.
+                        double abs_ratio = (a0c > 0.0 && r0c > 0.0) ? (a0c / r0c) : 0.0;
                         if( !(abs_ratio > 0.0) || !std::isfinite(abs_ratio) ) abs_ratio = 3.0;
 
                         double dx_env = envd("ENV_STEP_M", 2.0e-3);
@@ -1038,8 +1172,18 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                         dx_env = std::min(dx_env, 1.0e-2);
 
                         double x  = x0;
-                        double r  = r0;
+                        double r  = r0c;
                         double rp = rp0;
+
+                        auto mean_pred_at = [&](double xpred) -> double {
+                            if (have_steer) {
+                                return ymean_ag + ymean_slope * (xpred - x_ag_plane);
+                            }
+                            if (I_ag_out_Apm > 0.0 && std::isfinite(ymean_ag)) {
+                                return ymean_ag;
+                            }
+                            return std::numeric_limits<double>::quiet_NaN();
+                        };
 
                         max_abs_pred_m = abs_ratio * r;
                         hits_tube_pred = 0;
@@ -1061,7 +1205,13 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                             }
 
                             if (x <= x_phys_end + 1.0e-12) {
-                                const double abs_now = abs_ratio * r;
+                                double abs_now = abs_ratio * r;
+                                if (have_steer) {
+                                    const double ymean_pred = mean_pred_at(x);
+                                    if (std::isfinite(ymean_pred)) {
+                                        abs_now = std::fabs(ymean_pred) + abs_ratio * r;
+                                    }
+                                }
                                 if( abs_now > max_abs_pred_m ) max_abs_pred_m = abs_now;
                                 if( !hits_tube_pred && abs_now >= tube_inner ) {
                                     hits_tube_pred = 1;
@@ -1082,18 +1232,40 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
 
                         if( env_reason.empty() ) {
                             if (got_phys_end && std::isfinite(r_end)) {
-                                footprint_pred_m = abs_ratio * r_end;
+                                double abs_end = abs_ratio * r_end;
+                                if (have_steer) {
+                                    const double ymean_pred = mean_pred_at(x_phys_end);
+                                    if (std::isfinite(ymean_pred)) {
+                                        abs_end = std::fabs(ymean_pred) + abs_ratio * r_end;
+                                    }
+                                }
+                                footprint_pred_m = abs_end;
                                 clearance_pred_m = tube_inner - footprint_pred_m;
                                 env_ok = std::isfinite(footprint_pred_m);
                             } else {
                                 env_reason = "missing envelope at physical end";
                             }
-                            if (got_targets[0] && std::isfinite(r_targets[0]))
-                                footprint_pred_400mm_m = abs_ratio * r_targets[0];
-                            if (got_targets[1] && std::isfinite(r_targets[1]))
-                                footprint_pred_500mm_m = abs_ratio * r_targets[1];
-                            if (got_targets[2] && std::isfinite(r_targets[2]))
-                                footprint_pred_600mm_m = abs_ratio * r_targets[2];
+                            if (got_targets[0] && std::isfinite(r_targets[0])) {
+                                double abs_t = abs_ratio * r_targets[0];
+                                if (std::isfinite(y_mean_pred_400mm_m)) {
+                                    abs_t = std::fabs(y_mean_pred_400mm_m) + abs_ratio * r_targets[0];
+                                }
+                                footprint_pred_400mm_m = abs_t;
+                            }
+                            if (got_targets[1] && std::isfinite(r_targets[1])) {
+                                double abs_t = abs_ratio * r_targets[1];
+                                if (std::isfinite(y_mean_pred_500mm_m)) {
+                                    abs_t = std::fabs(y_mean_pred_500mm_m) + abs_ratio * r_targets[1];
+                                }
+                                footprint_pred_500mm_m = abs_t;
+                            }
+                            if (got_targets[2] && std::isfinite(r_targets[2])) {
+                                double abs_t = abs_ratio * r_targets[2];
+                                if (std::isfinite(y_mean_pred_600mm_m)) {
+                                    abs_t = std::fabs(y_mean_pred_600mm_m) + abs_ratio * r_targets[2];
+                                }
+                                footprint_pred_600mm_m = abs_t;
+                            }
                         }
                     }
                 }
@@ -1232,11 +1404,14 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
 // In that case it is common to see I_sm_A -> 0 even when the extracted beam at the accelerator exit
 // is healthy. For perveance tracking we therefore *default* to AG-exit current and also report the
 // "true" sample-plane perveance separately when available.
-const double P_geom_pg_A_per_V32 = (V32 > 0.0) ? (I_pg_in_A  / V32) : 0.0;
-const double P_geom_ag_A_per_V32 = (V32 > 0.0) ? (I_ag_out_A / V32) : 0.0;
+const double I_pg_in_A_per  = (N_beamlets_sim > 0.0) ? (I_pg_in_A  / N_beamlets_sim) : I_pg_in_A;
+const double I_ag_out_A_per = (N_beamlets_sim > 0.0) ? (I_ag_out_A / N_beamlets_sim) : I_ag_out_A;
+const double I_sm_A_per     = (N_beamlets_sim > 0.0) ? (I_sm_A     / N_beamlets_sim) : I_sm_A;
+const double P_geom_pg_A_per_V32 = (V32 > 0.0) ? (I_pg_in_A_per  / V32) : 0.0;
+const double P_geom_ag_A_per_V32 = (V32 > 0.0) ? (I_ag_out_A_per / V32) : 0.0;
 
 // True sample-plane perveance (only meaningful when the sample plane is physically present)
-const double P_geom_sm_true_A_per_V32 = (V32 > 0.0) ? (I_sm_A / V32) : 0.0;
+const double P_geom_sm_true_A_per_V32 = (V32 > 0.0) ? (I_sm_A_per / V32) : 0.0;
 
 // Back-compat: the "sm" perveance fields now follow AG-exit current to avoid spurious zeros
 const double P_geom_sm_A_per_V32 = P_geom_ag_A_per_V32;
@@ -1246,16 +1421,16 @@ const double Pnorm_ag = (P_CL_A_per_V32 > 0.0) ? (P_geom_ag_A_per_V32 / P_CL_A_p
 const double Pnorm_sm_true = (P_CL_A_per_V32 > 0.0) ? (P_geom_sm_true_A_per_V32 / P_CL_A_per_V32) : 0.0;
 const double Pnorm_sm = Pnorm_ag;
 
-const double I_sys_pg_A = I_pg_in_A  * N_beamlets_est;
-const double I_sys_ag_A = I_ag_out_A * N_beamlets_est;
-const double I_sys_sm_true_A = I_sm_A * N_beamlets_est;
+const double I_sys_pg_A = I_pg_in_A_per  * N_beamlets_sim;
+const double I_sys_ag_A = I_ag_out_A_per * N_beamlets_sim;
+const double I_sys_sm_true_A = I_sm_A_per * N_beamlets_sim;
 
 // Back-compat: I_sample_A reported in the perveance block follows AG-exit current
 const double I_sys_sm_A = I_sys_ag_A;
 
-const double P_sys_geom_pg_A_per_V32 = P_geom_pg_A_per_V32 * N_beamlets_est;
-const double P_sys_geom_ag_A_per_V32 = P_geom_ag_A_per_V32 * N_beamlets_est;
-const double P_sys_geom_sm_true_A_per_V32 = P_geom_sm_true_A_per_V32 * N_beamlets_est;
+const double P_sys_geom_pg_A_per_V32 = P_geom_pg_A_per_V32 * N_beamlets_sim;
+const double P_sys_geom_ag_A_per_V32 = P_geom_ag_A_per_V32 * N_beamlets_sim;
+const double P_sys_geom_sm_true_A_per_V32 = P_geom_sm_true_A_per_V32 * N_beamlets_sim;
 
 // Back-compat: system "sm" perveance follows AG-exit current
 const double P_sys_geom_sm_A_per_V32 = P_sys_geom_ag_A_per_V32;
@@ -1273,7 +1448,7 @@ const double P_sys_norm_sm = P_sys_norm_ag;
                 mj << "    \"d_eff_m\": "   << std::setprecision(10) << d_eff_m   << ",\n";
                 mj << "    \"P_CL_A_per_V32\": " << std::setprecision(10) << P_CL_A_per_V32 << ",\n";
                 mj << "    \"I_CL_A\": "         << std::setprecision(10) << I_CL_A         << ",\n";
-                mj << "    \"N_beamlets_est\": " << std::setprecision(10) << N_beamlets_est << ",\n";
+                mj << "    \"N_beamlets_sim\": " << std::setprecision(10) << N_beamlets_sim << ",\n";
                 mj << "    \"P_CL_sys_A_per_V32\": " << std::setprecision(10) << P_CL_sys_A_per_V32 << ",\n";
                 mj << "    \"I_CL_sys_A\": "         << std::setprecision(10) << I_CL_sys_A         << ",\n";
 
@@ -1345,10 +1520,16 @@ const double P_sys_norm_sm = P_sys_norm_ag;
             // account for offset + chamfer widening (centered between screen/accel offsets)
             double max_delta2 = std::max({ g_scr_du*g_scr_mu, g_scr_dd*g_scr_md,
                                            g_acc_du*g_acc_mu, g_acc_dd*g_acc_md });
-            const double y_center = 0.5 * (scr_off_y + off_y);
-            const double y_span = std::max(std::fabs(scr_off_y - y_center),
-                                           std::fabs(off_y - y_center));
-            double ymax_local = y_span + a + max_delta2 + pad;
+            double y_min = 0.0, y_max = 0.0;
+            if (!g_scr_offs.empty() || !g_acc_offs.empty()) {
+                y_min = 1.0e100; y_max = -1.0e100;
+                for (double yv : g_scr_offs) { y_min = std::min(y_min, yv); y_max = std::max(y_max, yv); }
+                for (double yv : g_acc_offs) { y_min = std::min(y_min, yv); y_max = std::max(y_max, yv); }
+            }
+            const double y_center = 0.5 * (y_min + y_max);
+            const double y_span = std::max(std::fabs(y_min - y_center),
+                                           std::fabs(y_max - y_center));
+            double ymax_local = y_span + a_max + max_delta2 + pad;
             double y0 = y_center - ymax_local, y1 = y_center + ymax_local;
 
             // aspect-preserving size: 800 px tall, width scaled by xr/yr
@@ -1394,10 +1575,16 @@ const double P_sys_norm_sm = P_sys_norm_ag;
         double x1 = xa1 + pad;
         double max_delta = std::max({ g_scr_du*g_scr_mu, g_scr_dd*g_scr_md,
                                       g_acc_du*g_acc_mu, g_acc_dd*g_acc_md });
-        const double y_center = 0.5 * (scr_off_y + off_y);
-        const double y_span = std::max(std::fabs(scr_off_y - y_center),
-                                       std::fabs(off_y - y_center));
-        double ymax_local = y_span + a + max_delta + pad;
+        double y_min = 0.0, y_max = 0.0;
+        if (!g_scr_offs.empty() || !g_acc_offs.empty()) {
+            y_min = 1.0e100; y_max = -1.0e100;
+            for (double yv : g_scr_offs) { y_min = std::min(y_min, yv); y_max = std::max(y_max, yv); }
+            for (double yv : g_acc_offs) { y_min = std::min(y_min, yv); y_max = std::max(y_max, yv); }
+        }
+        const double y_center = 0.5 * (y_min + y_max);
+        const double y_span = std::max(std::fabs(y_min - y_center),
+                                       std::fabs(y_max - y_center));
+        double ymax_local = y_span + a_max + max_delta + pad;
         double y0 = y_center - ymax_local, y1 = y_center + ymax_local;
 
         const int   BASE = envi("CLOSE_BASE_PX", 800);
