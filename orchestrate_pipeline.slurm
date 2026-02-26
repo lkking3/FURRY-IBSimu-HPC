@@ -26,17 +26,17 @@ umask 002
 # =====================================================================================
 
 # Resources for Stage-1 compute tasks (per array element)
-SWEEP_CPUS=2
-SWEEP_MEM=2GB
+SWEEP_CPUS=10
+SWEEP_MEM=10GB
 SWEEP_TIME=24:00:00
 SWEEP_PART=medium       # comment out to skip setting partition
 
 # Array concurrency (how many Stage-1 tasks at once)
-ARRAY_CONC=5
+ARRAY_CONC=1
 
 # Results root & run name prefix
 RESULTS_DIR="${RESULTS_DIR:-$PWD/results}"
-RUN_PREFIX="two_grid_Convergence_Study_Idealized_Grid_offset"
+RUN_PREFIX="two_grid_Convergence_Study_FullTube_MultiAperture_MaxTurningRadius_densityvis"
 RUN_STAMP="${RUN_STAMP:-$(date +%Y%m%d_%H%M%S)}"
 
 # ---- Stage-1 verticality sampling knobs (passed to compute jobs) ----
@@ -48,17 +48,17 @@ VERT_STEP_M=1e-4
 VERT_THRESH_DEG=2.0
 
 # ---- Base geometry (non-swept defaults) ----
-H=8e-5
+H=1e-4
 X_LEFT_M=2e-3
 X_RIGHT_M="${X_RIGHT_M:-0.02}"
 # Physical tube/sample length used for envelope projection (can exceed X_RIGHT_M)
 X_RIGHT_PHYS_M="${X_RIGHT_PHYS_M:-0.55}"
 YBOX_M=0.086
-ACCEL_OFF_Y_M=0.07875
-SCREEN_OFF_Y_M=0.0784
-SPLIT_AP_RAD="${SPLIT_AP_RAD:-1}"
-APERTURE_PAIRS_M="${APERTURE_PAIRS_M:-}"
-APERTURE_MIRROR="${APERTURE_MIRROR:-0}"
+ACCEL_OFF_Y_M=0.0
+SCREEN_OFF_Y_M=0.0
+SPLIT_AP_RAD="${SPLIT_AP_RAD:-0}"
+APERTURE_PAIRS_M="${APERTURE_PAIRS_M:-0.0:0.0, 0.0347:0.0350, 0.0397:0.0400, 0.0447:0.0450}"
+APERTURE_MIRROR="${APERTURE_MIRROR:-1}"
 
 # Offset sweep controls (defaults = single value at the base offsets)
 ACCEL_OFF_START_M="${ACCEL_OFF_START_M:-$ACCEL_OFF_Y_M}"
@@ -67,16 +67,36 @@ ACCEL_OFF_COUNT="${ACCEL_OFF_COUNT:-1}"
 # Potentials & downstream slices
 VS_V=0
 VA_V=-10000
-SAMPLE_V=$VA_V
 TUBE_WALL_T_M=0.0002
-SAMPLE_PLATE_T_M=0.0002
-SAMPLE_PROFILE_X_M="${SAMPLE_PROFILE_X_M:-0.03}"
+SAMPLE_PROFILE_X_M="${SAMPLE_PROFILE_X_M:-0.548}"
+SAMPLE_HOLDER_ENABLE="${SAMPLE_HOLDER_ENABLE:-1}"
+SAMPLE_HOLDER_H_M="${SAMPLE_HOLDER_H_M:-0.066}"
+SAMPLE_HOLDER_T_M="${SAMPLE_HOLDER_T_M:-0.001}"
+SAMPLE_HOLDER_V="${SAMPLE_HOLDER_V:--10000}"
 
 # Auto-plot sample profile JSONs after each run
-PLOT_PROFILE="${PLOT_PROFILE:-0}"
+PLOT_PROFILE="${PLOT_PROFILE:-1}"
 PLOT_PROFILE_Y="${PLOT_PROFILE_Y:-I_A}"
 PLOT_PROFILE_X_UNITS="${PLOT_PROFILE_X_UNITS:-mm}"
 PLOT_PROFILE_EXT="${PLOT_PROFILE_EXT:-png}"
+WRITE_DENSITY_PNG="${WRITE_DENSITY_PNG:-1}"
+DENSITY_PNG_NAME="${DENSITY_PNG_NAME:-two_grid_density.png}"
+DENSITY_NORM="${DENSITY_NORM:-0}"
+DENSITY_LOG10="${DENSITY_LOG10:-1}"
+DENSITY_FLOOR="${DENSITY_FLOOR:--1}"
+DENSITY_FLOOR_FRAC="${DENSITY_FLOOR_FRAC:-1e-6}"
+WRITE_DENSITY_GRID="${WRITE_DENSITY_GRID:-1}"
+DENSITY_GRID_NAME="${DENSITY_GRID_NAME:-ion_density_grid.dat}"
+DENSITY_GRID_STRIDE="${DENSITY_GRID_STRIDE:-1}"
+PLOT_DENSITY="${PLOT_DENSITY:-1}"
+DENSITY_PLOT_NAME="${DENSITY_PLOT_NAME:-two_grid_density.png}"
+DENSITY_PLOT_UNITS="${DENSITY_PLOT_UNITS:-mm}"
+DENSITY_PLOT_CMAP="${DENSITY_PLOT_CMAP:-viridis}"
+DENSITY_PLOT_LABEL="${DENSITY_PLOT_LABEL:-n_i (a.u.)}"
+DENSITY_PLOT_ELECTRODE_COLOR="${DENSITY_PLOT_ELECTRODE_COLOR:-black}"
+DENSITY_PLOT_NO_ELECTRODES="${DENSITY_PLOT_NO_ELECTRODES:-0}"
+DENSITY_PLOT_CLOSEUPS="${DENSITY_PLOT_CLOSEUPS:-1}"
+DENSITY_PLOT_CLOSE_PAD="${DENSITY_PLOT_CLOSE_PAD:-5e-4}"
 
 RUN_SOLVE=1
 WRITE_PNG=1
@@ -105,7 +125,7 @@ SC_FACTOR=${SC_FACTOR:-0.0005} # 1.0 = full space charge, <1.0 = partially neutr
 # Geometry
 AP_RAD_LIST=(0.0015)               # 0.001 0.0015 0.002 0.0025 0.003 0.0035 0.004 0.0045 0.005)
 SCREEN_AP_RAD_LIST=(0.0015)        # used when SPLIT_AP_RAD=1
-ACCEL_AP_RAD_LIST=(0.0016 0.0017 0.0018)         # used when SPLIT_AP_RAD=1
+ACCEL_AP_RAD_LIST=(0.0015)         # used when SPLIT_AP_RAD=1
 GRID_T_LIST=(0.005)                #0.004 0.005 0.006 0.007 0.008 0.009 0.01)
 GAP_LIST=(0.001)
 
@@ -141,7 +161,7 @@ ACCEL_OFF_LIST=( $(make_seq "$ACCEL_OFF_START_M" "$ACCEL_OFF_STEP_M" "$ACCEL_OFF
 # =====================================================================================
 # Stage-2 control
 # =====================================================================================
-RUN_STAGE2="${RUN_STAGE2:-1}"   # 0=no refine; 1=submit refine after reducer
+RUN_STAGE2="${RUN_STAGE2:-0}"   # 0=no refine; 1=submit refine after reducer
 
 # FIX: set an explicit knob list. If you want auto-pick later, set OPT_KNOBS="".
 # (current default: chamfer-only tweaks)
@@ -283,10 +303,12 @@ export APERTURE_MIRROR=__APERTURE_MIRROR__
 
 export VS_V=__VS_V__
 export VA_V=__VA_V__
-export SAMPLE_V=__SAMPLE_V__
 export TUBE_WALL_T_M=__TUBE_WALL_T_M__
-export SAMPLE_PLATE_T_M=__SAMPLE_PLATE_T_M__
 export SAMPLE_PROFILE_X_M=__SAMPLE_PROFILE_X_M__
+export SAMPLE_HOLDER_ENABLE=__SAMPLE_HOLDER_ENABLE__
+export SAMPLE_HOLDER_H_M=__SAMPLE_HOLDER_H_M__
+export SAMPLE_HOLDER_T_M=__SAMPLE_HOLDER_T_M__
+export SAMPLE_HOLDER_V=__SAMPLE_HOLDER_V__
 
 export RUN_SOLVE=__RUN_SOLVE__
 export WRITE_PNG=__WRITE_PNG__
@@ -307,6 +329,36 @@ export PLOT_PROFILE=__PLOT_PROFILE__
 export PLOT_PROFILE_Y="__PLOT_PROFILE_Y__"
 export PLOT_PROFILE_X_UNITS="__PLOT_PROFILE_X_UNITS__"
 export PLOT_PROFILE_EXT="__PLOT_PROFILE_EXT__"
+export WRITE_DENSITY_PNG=__WRITE_DENSITY_PNG__
+export DENSITY_PNG_NAME="__DENSITY_PNG_NAME__"
+export DENSITY_NORM=__DENSITY_NORM__
+export DENSITY_LOG10=__DENSITY_LOG10__
+export DENSITY_FLOOR=__DENSITY_FLOOR__
+export DENSITY_FLOOR_FRAC=__DENSITY_FLOOR_FRAC__
+export WRITE_DENSITY_GRID=__WRITE_DENSITY_GRID__
+export DENSITY_GRID_NAME="__DENSITY_GRID_NAME__"
+export DENSITY_GRID_STRIDE=__DENSITY_GRID_STRIDE__
+export PLOT_DENSITY=__PLOT_DENSITY__
+export DENSITY_PLOT_NAME="__DENSITY_PLOT_NAME__"
+export DENSITY_PLOT_UNITS="__DENSITY_PLOT_UNITS__"
+export DENSITY_PLOT_CMAP="__DENSITY_PLOT_CMAP__"
+export DENSITY_PLOT_LABEL="__DENSITY_PLOT_LABEL__"
+export DENSITY_PLOT_ELECTRODE_COLOR="__DENSITY_PLOT_ELECTRODE_COLOR__"
+export DENSITY_PLOT_NO_ELECTRODES="__DENSITY_PLOT_NO_ELECTRODES__"
+export DENSITY_PLOT_CLOSEUPS="__DENSITY_PLOT_CLOSEUPS__"
+export DENSITY_PLOT_CLOSE_PAD="__DENSITY_PLOT_CLOSE_PAD__"
+export DENSITY_PLOT_CLOSEUPS="__DENSITY_PLOT_CLOSEUPS__"
+export DENSITY_PLOT_CLOSE_PAD="__DENSITY_PLOT_CLOSE_PAD__"
+export DENSITY_PLOT_ELECTRODE_COLOR="__DENSITY_PLOT_ELECTRODE_COLOR__"
+export DENSITY_PLOT_NO_ELECTRODES="__DENSITY_PLOT_NO_ELECTRODES__"
+export WRITE_DENSITY_GRID=__WRITE_DENSITY_GRID__
+export DENSITY_GRID_NAME="__DENSITY_GRID_NAME__"
+export DENSITY_GRID_STRIDE=__DENSITY_GRID_STRIDE__
+export PLOT_DENSITY=__PLOT_DENSITY__
+export DENSITY_PLOT_NAME="__DENSITY_PLOT_NAME__"
+export DENSITY_PLOT_UNITS="__DENSITY_PLOT_UNITS__"
+export DENSITY_PLOT_CMAP="__DENSITY_PLOT_CMAP__"
+export DENSITY_PLOT_LABEL="__DENSITY_PLOT_LABEL__"
 
 export TRACE_ENABLE=__TRACE_ENABLE__
 export VERT_PAD_M=__VERT_PAD_M__
@@ -345,10 +397,12 @@ E_APMIR="$(sed_escape "$APERTURE_MIRROR")"
 E_SPLITRAD="$(sed_escape "$SPLIT_AP_RAD")"
 E_VS="$(sed_escape "$VS_V")"
 E_VA="$(sed_escape "$VA_V")"
-E_SAMP="$(sed_escape "$SAMPLE_V")"
 E_TW="$(sed_escape "$TUBE_WALL_T_M")"
-E_EP="$(sed_escape "$SAMPLE_PLATE_T_M")"
 E_SPX="$(sed_escape "${SAMPLE_PROFILE_X_M:-nan}")"
+E_SH_EN="$(sed_escape "$SAMPLE_HOLDER_ENABLE")"
+E_SH_H="$(sed_escape "$SAMPLE_HOLDER_H_M")"
+E_SH_T="$(sed_escape "$SAMPLE_HOLDER_T_M")"
+E_SH_V="$(sed_escape "$SAMPLE_HOLDER_V")"
 E_RUNSOLVE="$(sed_escape "$RUN_SOLVE")"
 E_WRITEPNG="$(sed_escape "$WRITE_PNG")"
 E_PNGNAME="$(sed_escape "$PNG_NAME")"
@@ -361,6 +415,24 @@ E_PPROF="$(sed_escape "$PLOT_PROFILE")"
 E_PPY="$(sed_escape "$PLOT_PROFILE_Y")"
 E_PPX="$(sed_escape "$PLOT_PROFILE_X_UNITS")"
 E_PPE="$(sed_escape "$PLOT_PROFILE_EXT")"
+E_DPNG="$(sed_escape "$WRITE_DENSITY_PNG")"
+E_DNAME="$(sed_escape "$DENSITY_PNG_NAME")"
+E_DNORM="$(sed_escape "$DENSITY_NORM")"
+E_DLOG="$(sed_escape "$DENSITY_LOG10")"
+E_DFLOOR="$(sed_escape "$DENSITY_FLOOR")"
+E_DFLOORF="$(sed_escape "$DENSITY_FLOOR_FRAC")"
+E_DGRID="$(sed_escape "$WRITE_DENSITY_GRID")"
+E_DGRIDNAME="$(sed_escape "$DENSITY_GRID_NAME")"
+E_DGRIDSTRIDE="$(sed_escape "$DENSITY_GRID_STRIDE")"
+E_PDEN="$(sed_escape "$PLOT_DENSITY")"
+E_PDENNAME="$(sed_escape "$DENSITY_PLOT_NAME")"
+E_PDENUNITS="$(sed_escape "$DENSITY_PLOT_UNITS")"
+E_PDENCOL="$(sed_escape "$DENSITY_PLOT_CMAP")"
+E_PDENLAB="$(sed_escape "$DENSITY_PLOT_LABEL")"
+E_PDENEC="$(sed_escape "$DENSITY_PLOT_ELECTRODE_COLOR")"
+E_PDENNO="$(sed_escape "$DENSITY_PLOT_NO_ELECTRODES")"
+E_PDENCU="$(sed_escape "$DENSITY_PLOT_CLOSEUPS")"
+E_PDENCUP="$(sed_escape "$DENSITY_PLOT_CLOSE_PAD")"
 E_TRACE="$(sed_escape "$TRACE_ENABLE")"
 E_VPAD="$(sed_escape "$VERT_PAD_M")"
 E_PFPX="$(sed_escape "$PLOT_FONT_PX")"
@@ -401,10 +473,12 @@ sed -i \
   -e "s#__APERTURE_MIRROR__#${E_APMIR}#" \
   -e "s#__VS_V__#${E_VS}#" \
   -e "s#__VA_V__#${E_VA}#" \
-  -e "s#__SAMPLE_V__#${E_SAMP}#" \
   -e "s#__TUBE_WALL_T_M__#${E_TW}#" \
-  -e "s#__SAMPLE_PLATE_T_M__#${E_EP}#" \
   -e "s#__SAMPLE_PROFILE_X_M__#${E_SPX}#" \
+  -e "s#__SAMPLE_HOLDER_ENABLE__#${E_SH_EN}#" \
+  -e "s#__SAMPLE_HOLDER_H_M__#${E_SH_H}#" \
+  -e "s#__SAMPLE_HOLDER_T_M__#${E_SH_T}#" \
+  -e "s#__SAMPLE_HOLDER_V__#${E_SH_V}#" \
   -e "s#__RUN_SOLVE__#${E_RUNSOLVE}#" \
   -e "s#__WRITE_PNG__#${E_WRITEPNG}#" \
   -e "s#__PNG_NAME__#${E_PNGNAME}#" \
@@ -418,6 +492,24 @@ sed -i \
   -e "s#__PLOT_PROFILE_Y__#${E_PPY}#" \
   -e "s#__PLOT_PROFILE_X_UNITS__#${E_PPX}#" \
   -e "s#__PLOT_PROFILE_EXT__#${E_PPE}#" \
+  -e "s#__WRITE_DENSITY_PNG__#${E_DPNG}#" \
+  -e "s#__DENSITY_PNG_NAME__#${E_DNAME}#" \
+  -e "s#__DENSITY_NORM__#${E_DNORM}#" \
+  -e "s#__DENSITY_LOG10__#${E_DLOG}#" \
+  -e "s#__DENSITY_FLOOR__#${E_DFLOOR}#" \
+  -e "s#__DENSITY_FLOOR_FRAC__#${E_DFLOORF}#" \
+  -e "s#__WRITE_DENSITY_GRID__#${E_DGRID}#" \
+  -e "s#__DENSITY_GRID_NAME__#${E_DGRIDNAME}#" \
+  -e "s#__DENSITY_GRID_STRIDE__#${E_DGRIDSTRIDE}#" \
+  -e "s#__PLOT_DENSITY__#${E_PDEN}#" \
+  -e "s#__DENSITY_PLOT_NAME__#${E_PDENNAME}#" \
+  -e "s#__DENSITY_PLOT_UNITS__#${E_PDENUNITS}#" \
+  -e "s#__DENSITY_PLOT_CMAP__#${E_PDENCOL}#" \
+  -e "s#__DENSITY_PLOT_LABEL__#${E_PDENLAB}#" \
+  -e "s#__DENSITY_PLOT_ELECTRODE_COLOR__#${E_PDENEC}#" \
+  -e "s#__DENSITY_PLOT_NO_ELECTRODES__#${E_PDENNO}#" \
+  -e "s#__DENSITY_PLOT_CLOSEUPS__#${E_PDENCU}#" \
+  -e "s#__DENSITY_PLOT_CLOSE_PAD__#${E_PDENCUP}#" \
   -e "s#__TRACE_ENABLE__#${E_TRACE}#" \
   -e "s#__VERT_PAD_M__#${E_VPAD}#" \
   -e "s#__VERT_XLEN_M__#${E_VXLEN}#" \
@@ -557,6 +649,33 @@ if [[ "${PLOT_PROFILE:-1}" != "0" ]]; then
       || echo "[plot] WARNING: failed to generate sample_profile.${ext}"
   fi
 fi
+
+# Optional: plot ion density grid
+if [[ "${PLOT_DENSITY:-1}" != "0" ]]; then
+  GRID_NAME="${DENSITY_GRID_NAME:-ion_density_grid.dat}"
+  GRID_PATH="${OUTDIR}/${GRID_NAME}"
+  if [[ -f "${GRID_PATH}" ]]; then
+    NO_E_FLAG=""
+    if [[ "${DENSITY_PLOT_NO_ELECTRODES:-0}" != "0" ]]; then
+      NO_E_FLAG="--no-electrodes"
+    fi
+    CLOSE_FLAG=""
+    if [[ "${DENSITY_PLOT_CLOSEUPS:-1}" != "0" ]]; then
+      CLOSE_FLAG="--closeups"
+    fi
+    python3 "__PIPE_ROOT__/plot_runlog_compact.py" density-plot \
+      --grid "${GRID_PATH}" \
+      --meta "${OUTDIR}/meta.json" \
+      --out "${OUTDIR}/${DENSITY_PLOT_NAME:-two_grid_density.png}" \
+      --units "${DENSITY_PLOT_UNITS:-mm}" \
+      --cmap "${DENSITY_PLOT_CMAP:-viridis}" \
+      --zlabel "${DENSITY_PLOT_LABEL:-n_i (a.u.)}" \
+      --electrode-color "${DENSITY_PLOT_ELECTRODE_COLOR:-black}" \
+      --close-pad "${DENSITY_PLOT_CLOSE_PAD:-5e-4}" \
+      ${CLOSE_FLAG} ${NO_E_FLAG} \
+      || echo "[plot] WARNING: failed to generate density plot"
+  fi
+fi
 EOF_SWEEP
 
 # Robust replace for sweep resources/paths
@@ -656,7 +775,7 @@ def extract_geom(meta):
     out.update({k:meta.get(k) for k in [
         "AP_RAD_M","SCREEN_AP_RAD_M","ACCEL_AP_RAD_M","GRID_T_M","GAP_M",
         "ACCEL_OFF_Y_M","SCREEN_OFF_Y_M","H","X_LEFT_M","X_RIGHT_M","YBOX_M",
-        "VS_V","VA_V","SAMPLE_V"
+        "VS_V","VA_V"
     ] if k in meta})
     out.update({
         "SCR_UP_DEPTH_M":scr.get("up_depth"), "SCR_UP_ANGLE_DEG":scr.get("up_angle_deg"),
@@ -1521,8 +1640,12 @@ export ACCEL_OFF_Y_M="${ACCEL_OFF_Y_M:-__ACCEL_OFF_Y_M__}" SCREEN_OFF_Y_M="${SCR
 export APERTURE_PAIRS_M="__APERTURE_PAIRS_M__"
 export APERTURE_MIRROR="__APERTURE_MIRROR__"
 export X_RIGHT_PHYS_M="__X_RIGHT_PHYS_M__"
-export VS_V="__VS_V__" VA_V="__VA_V__" SAMPLE_V="__SAMPLE_V__"
-export TUBE_WALL_T_M="__TUBE_WALL_T_M__" SAMPLE_PLATE_T_M="__SAMPLE_PLATE_T_M__"
+export VS_V="__VS_V__" VA_V="__VA_V__"
+export TUBE_WALL_T_M="__TUBE_WALL_T_M__"
+export SAMPLE_HOLDER_ENABLE="__SAMPLE_HOLDER_ENABLE__"
+export SAMPLE_HOLDER_H_M="__SAMPLE_HOLDER_H_M__"
+export SAMPLE_HOLDER_T_M="__SAMPLE_HOLDER_T_M__"
+export SAMPLE_HOLDER_V="__SAMPLE_HOLDER_V__"
 export SAMPLE_PROFILE_X_M="__SAMPLE_PROFILE_X_M__"
 export RUN_SOLVE="__RUN_SOLVE__" WRITE_PNG="__WRITE_PNG__" PNG_NAME="__PNG_NAME__"
 export CLOSE_PAD_M="__CLOSE_PAD_M__" CLOSE_BASE_PX="__CLOSE_BASE_PX__"
@@ -1538,6 +1661,12 @@ export PLOT_PROFILE="__PLOT_PROFILE__"
 export PLOT_PROFILE_Y="__PLOT_PROFILE_Y__"
 export PLOT_PROFILE_X_UNITS="__PLOT_PROFILE_X_UNITS__"
 export PLOT_PROFILE_EXT="__PLOT_PROFILE_EXT__"
+export WRITE_DENSITY_PNG="__WRITE_DENSITY_PNG__"
+export DENSITY_PNG_NAME="__DENSITY_PNG_NAME__"
+export DENSITY_NORM="__DENSITY_NORM__"
+export DENSITY_LOG10="__DENSITY_LOG10__"
+export DENSITY_FLOOR="__DENSITY_FLOOR__"
+export DENSITY_FLOOR_FRAC="__DENSITY_FLOOR_FRAC__"
 
 
 # Pack LISTS into env for python
@@ -1652,8 +1781,12 @@ fill_ref2 H "$H";               fill_ref2 X_LEFT_M "$X_LEFT_M";  fill_ref2 X_RIG
 fill_ref2 ACCEL_OFF_Y_M "$ACCEL_OFF_Y_M"; fill_ref2 SCREEN_OFF_Y_M "$SCREEN_OFF_Y_M"
 fill_ref2 APERTURE_PAIRS_M "$APERTURE_PAIRS_M"; fill_ref2 APERTURE_MIRROR "$APERTURE_MIRROR"
 fill_ref2 X_RIGHT_PHYS_M "$X_RIGHT_PHYS_M"
-fill_ref2 VS_V "$VS_V";         fill_ref2 VA_V "$VA_V";          fill_ref2 SAMPLE_V "$SAMPLE_V"
-fill_ref2 TUBE_WALL_T_M "$TUBE_WALL_T_M"; fill_ref2 SAMPLE_PLATE_T_M "$SAMPLE_PLATE_T_M"
+fill_ref2 VS_V "$VS_V";         fill_ref2 VA_V "$VA_V"
+fill_ref2 TUBE_WALL_T_M "$TUBE_WALL_T_M"
+fill_ref2 SAMPLE_HOLDER_ENABLE "$SAMPLE_HOLDER_ENABLE"
+fill_ref2 SAMPLE_HOLDER_H_M "$SAMPLE_HOLDER_H_M"
+fill_ref2 SAMPLE_HOLDER_T_M "$SAMPLE_HOLDER_T_M"
+fill_ref2 SAMPLE_HOLDER_V "$SAMPLE_HOLDER_V"
 fill_ref2 SAMPLE_PROFILE_X_M "${SAMPLE_PROFILE_X_M:-nan}"
 fill_ref2 RUN_SOLVE "$RUN_SOLVE"; fill_ref2 WRITE_PNG "$WRITE_PNG"; fill_ref2 PNG_NAME "$PNG_NAME"
 fill_ref2 CLOSE_PAD_M "$CLOSE_PAD_M"; fill_ref2 CLOSE_BASE_PX "$CLOSE_BASE_PX"
@@ -1668,6 +1801,24 @@ fill_ref2 PLOT_PROFILE "$PLOT_PROFILE"
 fill_ref2 PLOT_PROFILE_Y "$PLOT_PROFILE_Y"
 fill_ref2 PLOT_PROFILE_X_UNITS "$PLOT_PROFILE_X_UNITS"
 fill_ref2 PLOT_PROFILE_EXT "$PLOT_PROFILE_EXT"
+fill_ref2 WRITE_DENSITY_PNG "$WRITE_DENSITY_PNG"
+fill_ref2 DENSITY_PNG_NAME "$DENSITY_PNG_NAME"
+fill_ref2 DENSITY_NORM "$DENSITY_NORM"
+fill_ref2 DENSITY_LOG10 "$DENSITY_LOG10"
+fill_ref2 DENSITY_FLOOR "$DENSITY_FLOOR"
+fill_ref2 DENSITY_FLOOR_FRAC "$DENSITY_FLOOR_FRAC"
+fill_ref2 WRITE_DENSITY_GRID "$WRITE_DENSITY_GRID"
+fill_ref2 DENSITY_GRID_NAME "$DENSITY_GRID_NAME"
+fill_ref2 DENSITY_GRID_STRIDE "$DENSITY_GRID_STRIDE"
+fill_ref2 PLOT_DENSITY "$PLOT_DENSITY"
+fill_ref2 DENSITY_PLOT_NAME "$DENSITY_PLOT_NAME"
+fill_ref2 DENSITY_PLOT_UNITS "$DENSITY_PLOT_UNITS"
+fill_ref2 DENSITY_PLOT_CMAP "$DENSITY_PLOT_CMAP"
+fill_ref2 DENSITY_PLOT_LABEL "$DENSITY_PLOT_LABEL"
+fill_ref2 DENSITY_PLOT_ELECTRODE_COLOR "$DENSITY_PLOT_ELECTRODE_COLOR"
+fill_ref2 DENSITY_PLOT_NO_ELECTRODES "$DENSITY_PLOT_NO_ELECTRODES"
+fill_ref2 DENSITY_PLOT_CLOSEUPS "$DENSITY_PLOT_CLOSEUPS"
+fill_ref2 DENSITY_PLOT_CLOSE_PAD "$DENSITY_PLOT_CLOSE_PAD"
 fi
 
 
