@@ -64,10 +64,11 @@ IDENTITY_COLS = [
 ]
 
 ASSIGNED_COLS = [
-    "VS_V","VA_V","SAMPLE_V",
+    "VS_V","VA_V",
     "H","AP_RAD_M","SCREEN_AP_RAD_M","ACCEL_AP_RAD_M","GRID_T_M","GAP_M","ACCEL_OFF_Y_M","SCREEN_OFF_Y_M",
     "X_LEFT_M","X_RIGHT_M","X_RIGHT_PHYS_M","TRUNCATED_DRIFT","YBOX_M",
-    "TUBE_X_START_M","TUBE_X_END_M","TUBE_WALL_T_M","SAMPLE_PLATE_T_M",
+    "TUBE_X_START_M","TUBE_X_END_M","TUBE_WALL_T_M",
+    "SAMPLE_HOLDER_ENABLE","SAMPLE_HOLDER_H_M","SAMPLE_HOLDER_T_M","SAMPLE_HOLDER_V",
     "APERTURE_MIRROR","N_APERTURES","APERTURE_PAIRS_M",
     "SCR_UP_DEPTH_M","SCR_UP_ANGLE_DEG","SCR_DN_DEPTH_M","SCR_DN_ANGLE_DEG",
     "ACC_UP_DEPTH_M","ACC_UP_ANGLE_DEG","ACC_DN_DEPTH_M","ACC_DN_ANGLE_DEG",
@@ -127,7 +128,7 @@ def extract_row(run_dir: Path, results_dir: Path) -> Dict[str, Any]:
     row["RUN_TAG"]   = meta.get("RUN_TAG")
     row["RUN_STAMP"] = meta.get("RUN_STAMP")
 
-    for k in ["VS_V","VA_V","SAMPLE_V","H","AP_RAD_M","SCREEN_AP_RAD_M","ACCEL_AP_RAD_M","GRID_T_M","GAP_M","ACCEL_OFF_Y_M","SCREEN_OFF_Y_M",
+    for k in ["VS_V","VA_V","H","AP_RAD_M","SCREEN_AP_RAD_M","ACCEL_AP_RAD_M","GRID_T_M","GAP_M","ACCEL_OFF_Y_M","SCREEN_OFF_Y_M",
               "X_LEFT_M","X_RIGHT_M","X_RIGHT_PHYS_M","TRUNCATED_DRIFT","YBOX_M",
               "APERTURE_MIRROR","N_APERTURES","APERTURE_PAIRS_M"]:
         if k in meta:
@@ -137,7 +138,15 @@ def extract_row(run_dir: Path, results_dir: Path) -> Dict[str, Any]:
     row["TUBE_X_START_M"] = tube.get("x_start")
     row["TUBE_X_END_M"]   = tube.get("x_end")
     row["TUBE_WALL_T_M"]  = tube.get("wall_t")
-    row["SAMPLE_PLATE_T_M"]= tube.get("endplate_t")
+    row["SAMPLE_HOLDER_T_M"] = tube.get("holder_t")
+
+    holder = meta.get("SAMPLE_HOLDER") or {}
+    if "enabled" in holder:
+        row["SAMPLE_HOLDER_ENABLE"] = holder.get("enabled")
+    row["SAMPLE_HOLDER_H_M"] = holder.get("height_m")
+    if row.get("SAMPLE_HOLDER_T_M") is None:
+        row["SAMPLE_HOLDER_T_M"] = holder.get("thickness_m")
+    row["SAMPLE_HOLDER_V"] = holder.get("V")
     
     scr = meta.get("screen_chamfer") or {}
     acc = meta.get("accel_chamfer") or {}
