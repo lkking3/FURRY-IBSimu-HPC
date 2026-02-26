@@ -171,11 +171,13 @@ static double g_scr_dd = 0.0, g_scr_md = 0.0; // depth & slope downstream
 static double g_acc_du = 0.0, g_acc_mu = 0.0;
 static double g_acc_dd = 0.0, g_acc_md = 0.0;
 
-// tube/endplate geometry globals
+// tube/holder geometry globals
 static double g_ybox = 0.0;
 static double g_tube_x0 = 0.0, g_tube_x1 = 0.0;
 static double g_tube_w  = 0.0;  // wall thickness
-static double g_end_w   = 0.0;  // endplate thickness
+static double g_end_w   = 0.0;  // sample holder thickness
+static double g_holder_x0 = 0.0, g_holder_x1 = 0.0;
+static double g_holder_hh = 0.0;  // sample holder half-height
 
 
 
@@ -245,9 +247,8 @@ static bool tube_bot_fn(double x, double y, double /*z*/) {
     return (x >= g_tube_x0 && x <= g_tube_x1 && y <= (-g_ybox + g_tube_w));
 }
 
-// --------- solid: downstream endplate (sample face) ----------
-static bool endplate_fn(double x, double y, double /*z*/) {
-    return (x >= (g_tube_x1 - g_end_w) && x <= g_tube_x1);
+static bool holder_fn(double x, double y, double /*z*/) {
+    return (x >= g_holder_x0 && x <= g_holder_x1 && std::fabs(y) <= g_holder_hh);
 }
 
 int main() try {
@@ -335,7 +336,6 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
     // ----- electrical potentials -----
     const double VS_V     = envd("VS_V", 0.0);   // screen potential [V]
     const double VA_V     = envd("VA_V",  -1.0e4);     // accel/tube potential [V]
-    const double SAMPLE_V = envd("SAMPLE_V", VA_V); // sample face potential [V]
 
     // ----- screen chamfers -----
     double scr_du = envd("SCR_UP_DEPTH_M",   0.0);
@@ -436,7 +436,7 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
     g_acc_du = acc_du; g_acc_mu = acc_mu;
     g_acc_dd = acc_dd; g_acc_md = acc_md;
 
-    // Tube/endplate sizing
+    // Tube/holder sizing
     const double max_delta = std::max({ scr_du*scr_mu, scr_dd*scr_md, acc_du*acc_mu, acc_dd*acc_md });
     const double a_max = std::max(a_scr, a_acc);
     double off_abs = 0.0;
@@ -454,8 +454,21 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
     g_tube_x0 = envd("TUBE_X_START_M", xa1);
     g_tube_x1 = envd("TUBE_X_END_M",   xmax);
     g_tube_w  = std::max(envd("TUBE_WALL_T_M", 2.0*h), h);    // keep >= h
-    g_end_w   = std::max(envd("SAMPLE_PLATE_T_M", 2.0*h), h); // endplate thickness
-    const bool endplate_enabled = !truncated_drift;
+    g_end_w   = 0.0;
+    const bool endplate_enabled = !truncated_drift; // full-length run
+
+    const double holder_h = envd("SAMPLE_HOLDER_H_M", 6.6e-2);
+    const double holder_w = envd("SAMPLE_HOLDER_T_M", 1.0e-3);
+    const double holder_v = envd("SAMPLE_HOLDER_V", -1.0e4);
+    const int holder_enable = envi("SAMPLE_HOLDER_ENABLE", endplate_enabled ? 1 : 0);
+    const bool holder_enabled = endplate_enabled && (holder_enable != 0) &&
+                                (holder_h > 0.0) && (holder_w > 0.0);
+    if (holder_enabled) {
+        g_end_w = holder_w;
+        g_holder_x1 = g_tube_x1;
+        g_holder_x0 = g_tube_x1 - holder_w;
+        g_holder_hh = 0.5 * holder_h;
+    }
     
     // results directory naming (sweep-friendly)
     const std::string results_base = envs("RESULTS_DIR", "results");
@@ -491,15 +504,18 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
     geom.set_solid(8,  new FuncSolid(&accel_fn));
     geom.set_solid(9,  new FuncSolid(&tube_top_fn));
     geom.set_solid(10, new FuncSolid(&tube_bot_fn));
-    if (endplate_enabled) {
-        geom.set_solid(11, new FuncSolid(&endplate_fn));
+    if (holder_enabled) {
+        geom.set_solid(11, new FuncSolid(&holder_fn));
     }
 
     // --- Boundary conditions ---
     // Global box:
     geom.set_boundary(1, Bound(BOUND_DIRICHLET, VS_V)); // xmin (plasma chamber potential)
-    if (endplate_enabled) {
-        // Full-length run: pin far boundary to tube potential.
+    if (holder_enabled) {
+        // Full-length run with sample holder: open boundary (no normal E-field).
+        geom.set_boundary(2, Bound(BOUND_NEUMANN, 0.0)); // xmax
+    } else if (endplate_enabled) {
+        // Full-length run without holder: pin far boundary to tube potential.
         geom.set_boundary(2, Bound(BOUND_DIRICHLET, VA_V)); // xmax
     } else {
         // Truncated drift: open boundary (no normal E-field).
@@ -513,8 +529,8 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
     geom.set_boundary(8,  Bound(BOUND_DIRICHLET, VA_V));     // accel
     geom.set_boundary(9,  Bound(BOUND_DIRICHLET, VA_V));     // tube top
     geom.set_boundary(10, Bound(BOUND_DIRICHLET, VA_V));     // tube bottom
-    if (endplate_enabled) {
-        geom.set_boundary(11, Bound(BOUND_DIRICHLET, SAMPLE_V)); // endplate / sample face
+    if (holder_enabled) {
+        geom.set_boundary(11, Bound(BOUND_DIRICHLET, holder_v)); // sample holder electrode
     }
 
     geom.build_mesh();
@@ -560,13 +576,18 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
         m << "  \"TRUNCATED_DRIFT\":" << (truncated_drift ? "true" : "false") << ",\n";
         m << "  \"XMAX_PHYS_M\":" << xmax_phys << ",\n";
         m << "  \"YBOX_M\":" << g_ybox << ",\n";
+        m << "  \"SAMPLE_HOLDER\": {"
+          << "\"enabled\":" << (holder_enabled ? "true" : "false")
+          << ", \"height_m\":" << holder_h
+          << ", \"thickness_m\":" << holder_w
+          << ", \"V\":" << holder_v
+          << "},\n";
 
         // Potentials (top-level + nested, for convenience)
         m << "  \"VS_V\":" << VS_V << ",\n";
         m << "  \"VA_V\":" << VA_V << ",\n";
-        m << "  \"SAMPLE_V\":" << SAMPLE_V << ",\n";
         m << "  \"potentials\": {\"VS_V\":" << VS_V
-        << ", \"VA_V\":" << VA_V << ", \"SAMPLE_V\":" << SAMPLE_V << "},\n";
+        << ", \"VA_V\":" << VA_V << "},\n";
         // Plasma/beam knobs (for provenance; used by Stage-2)
         m << "  \"physics\": {"
           << "\"ENABLE_IONS\":" << ENABLE_IONS
@@ -594,9 +615,9 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
         << "\"up_depth\":" << acc_du << ", \"up_angle_deg\":" << acc_ua
         << ", \"dn_depth\":" << acc_dd << ", \"dn_angle_deg\":" << acc_da << "},\n";
 
-        // Tube / endplate
+        // Tube / holder
         m << "  \"tube\": {\"x_start\":" << g_tube_x0 << ", \"x_end\":" << g_tube_x1
-        << ", \"wall_t\":" << g_tube_w << ", \"endplate_t\":" << g_end_w << "},\n";
+        << ", \"wall_t\":" << g_tube_w << ", \"holder_t\":" << g_end_w << "},\n";
 
         // Perveance reference numbers (Child-Langmuir) for this geometry
         m << "  \"perveance_ref\": {"
@@ -624,8 +645,8 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
 
 
     // Summary
-    std::printf("# two-grid 2D (offset + chamfers + BCs + tube/endplate)\n");
-    std::printf("VS_V=%g  VA_V=%g  SAMPLE_V=%g\n", VS_V, VA_V, SAMPLE_V);
+    std::printf("# two-grid 2D (offset + chamfers + BCs + tube/holder)\n");
+    std::printf("VS_V=%g  VA_V=%g\n", VS_V, VA_V);
     std::printf("screen: x=[%g,%g]  up(depth=%g,ang=%g)  dn(depth=%g,ang=%g)\n",
                 xs0,xs1,scr_du,scr_ua,scr_dd,scr_da);
     std::printf("accel : x=[%g,%g]  up(depth=%g,ang=%g)  dn(depth=%g,ang=%g)\n",
@@ -639,7 +660,11 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
     std::printf("\n");
     if (scr_scaled) std::printf("NOTE: screen chamfers scaled to fit thickness\n");
     if (acc_scaled) std::printf("NOTE: accel  chamfers scaled to fit thickness\n");
-    std::printf("tube walls: x=[%g,%g]  wall_t=%g  endplate_t=%g\n",
+    if (holder_enabled) {
+        std::printf("sample holder: x=[%g,%g] y=[%g,%g] V=%g\n",
+                    g_holder_x0, g_holder_x1, -g_holder_hh, g_holder_hh, holder_v);
+    }
+    std::printf("tube walls: x=[%g,%g]  wall_t=%g  holder_t=%g\n",
                 g_tube_x0,g_tube_x1,g_tube_w,g_end_w);
     std::printf("domain: x=[%g,%g], y=[%g,%g]\n", xmin,xmax,-g_ybox,g_ybox);
     std::printf("# results dir: %s\n", outdir.c_str());
@@ -858,12 +883,13 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             // Planes:
             //  - PG entrance: upstream face of plasma/screen plate
             //  - AG exit:     downstream face of accel plate
-            //  - Sample wall: just upstream of endplate
+            //  - Sample wall: just upstream of holder (if enabled)
             // Probe planes (offset by +0.5*h so we sample *in vacuum*, not on an electrode surface)
             const double x_pg_plane = xs0 + 0.5*h;
             const double x_ag_plane = xa1 + 0.5*h;
-            const double x_sm_plane = endplate_enabled ? (g_tube_x1 - g_end_w - 0.5*h)
-                                                     : std::numeric_limits<double>::quiet_NaN();
+            const double x_sm_plane = endplate_enabled
+                                          ? (holder_enabled ? (g_holder_x0 - 0.5*h) : (g_tube_x1 - 0.5*h))
+                                          : std::numeric_limits<double>::quiet_NaN();
 
             double I_pg_in_Apm  = 0.0, ymean_pg = 0.0, yr_pg  = 0.0, yr_pg_c  = 0.0, ymax_pg  = 0.0, ymax_pg_c  = 0.0;
             double I_ag_out_Apm = 0.0, ymean_ag = 0.0, yr_ag  = 0.0, yr_ag_c  = 0.0, ymax_ag  = 0.0, ymax_ag_c  = 0.0;
@@ -1042,7 +1068,7 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             const int    Nplanes    = envi("BEAM_COL_NPLANES", 32);
             const double margin     = envd("BEAM_COL_MARGIN_M", 2.0*h);   // stay a bit away from sample wall
             const double x_start    = xa1;                // start at accel exit
-            const double x_end      = g_tube_x1 - (endplate_enabled ? g_end_w : 0.0) - margin; // end just before endplate
+            const double x_end      = g_tube_x1 - (endplate_enabled ? g_end_w : 0.0) - margin; // end just before holder
             const double tube_inner = g_ybox - g_tube_w;  // half-height of free tube aperture
 
             double y_rms_max    = 0.0;
@@ -1512,48 +1538,157 @@ const double P_sys_norm_sm = P_sys_norm_ag;
             std::printf("wrote PNG (with epot/efield%s): %s\n",
                         use_pdb ? " + beam" : "", png.c_str());
 
-            // Close-up around the grids
+            // Close-up around the grids (per beamlet pair when multiple apertures)
             const double pad = envd("CLOSE_PAD_M", 5e-4);  // 0.5 mm default
             double x0 = xs0 - pad;
             double x1 = xa1 + pad;
 
-            // account for offset + chamfer widening (centered between screen/accel offsets)
             double max_delta2 = std::max({ g_scr_du*g_scr_mu, g_scr_dd*g_scr_md,
                                            g_acc_du*g_acc_mu, g_acc_dd*g_acc_md });
-            double y_min = 0.0, y_max = 0.0;
-            if (!g_scr_offs.empty() || !g_acc_offs.empty()) {
-                y_min = 1.0e100; y_max = -1.0e100;
-                for (double yv : g_scr_offs) { y_min = std::min(y_min, yv); y_max = std::max(y_max, yv); }
-                for (double yv : g_acc_offs) { y_min = std::min(y_min, yv); y_max = std::max(y_max, yv); }
+
+            auto plot_closeup = [&](double ylo, double yhi, const std::string &outpath) {
+                const double y_center = 0.5 * (ylo + yhi);
+                const double y_span = std::max(std::fabs(ylo - y_center),
+                                               std::fabs(yhi - y_center));
+                double ymax_local = y_span + a_max + max_delta2 + pad;
+                double y0 = y_center - ymax_local, y1 = y_center + ymax_local;
+
+                // aspect-preserving size: 800 px tall, width scaled by xr/yr
+                const int   BASE = envi("CLOSE_BASE_PX", 800);
+                const double xr = x1 - x0, yr = y1 - y0;
+                const int   H = BASE;
+                const int   W = std::max(1, int(std::lround(BASE * (xr/yr))));
+
+                GeomPlotter gpc(geom);
+                gpc.set_view(VIEW_XY, -1);
+                gpc.set_epot(&epot);
+                gpc.set_efield(&efield);
+                if (use_pdb) {
+                    gpc.set_particle_database(&pdb);
+                }
+                gpc.set_ranges(x0, y0, x1, y1);
+                gpc.set_font_size(FONT_PX);
+                gpc.set_size(W, H);
+                gpc.plot_png(outpath.c_str());
+            };
+
+            std::vector<std::pair<double,double>> close_pairs;
+            close_pairs.reserve(ap_pairs.size());
+            const double eps = 1.0e-12;
+            for (const auto &p : ap_pairs) {
+                const double y_center = 0.5 * (p.first + p.second);
+                if (y_center >= -eps) {
+                    close_pairs.push_back(p);
+                }
             }
-            const double y_center = 0.5 * (y_min + y_max);
-            const double y_span = std::max(std::fabs(y_min - y_center),
-                                           std::fabs(y_max - y_center));
-            double ymax_local = y_span + a_max + max_delta2 + pad;
-            double y0 = y_center - ymax_local, y1 = y_center + ymax_local;
-
-            // aspect-preserving size: 800 px tall, width scaled by xr/yr
-            const int   BASE = envi("CLOSE_BASE_PX", 800);
-            const double xr = x1 - x0, yr = y1 - y0;
-            const int   H = BASE;
-            const int   W = std::max(1, int(std::lround(BASE * (xr/yr))));
-
-            GeomPlotter gpc(geom);
-            gpc.set_view(VIEW_XY, -1);
-            gpc.set_epot(&epot);
-            gpc.set_efield(&efield);
-            if (use_pdb) {
-                gpc.set_particle_database(&pdb);
+            if (close_pairs.empty() && !ap_pairs.empty()) {
+                close_pairs.push_back(ap_pairs.front());
             }
-            gpc.set_ranges(x0, y0, x1, y1);
-	    gpc.set_font_size(FONT_PX);
-            gpc.set_size(W, H);
 
-            // write close-up next to main PNG in results dir
-            std::string close = add_suffix_before_ext(png, "_closeup");
-            gpc.plot_png(close.c_str());
-            std::printf("wrote PNG (close-up%s): %s\n",
-                        use_pdb ? " + beam" : "", close.c_str());
+            for (size_t ci = 0; ci < close_pairs.size(); ++ci) {
+                const double ylo = std::min(close_pairs[ci].first, close_pairs[ci].second);
+                const double yhi = std::max(close_pairs[ci].first, close_pairs[ci].second);
+                std::string close = add_suffix_before_ext(png, "_closeup");
+                if (ci > 0) {
+                    close = add_suffix_before_ext(png, "_closeup_p" + std::to_string(ci));
+                }
+                plot_closeup(ylo, yhi, close);
+                std::printf("wrote PNG (close-up%s): %s\n",
+                            use_pdb ? " + beam" : "", close.c_str());
+            }
+
+            // Ion number density grid (derived from scharge, undoing SCC scaling)
+            const int write_density_grid = envi("WRITE_DENSITY_GRID", use_pdb ? 1 : 0);
+            if (write_density_grid && use_pdb) {
+                MeshScalarField nion(geom);
+                const uint32_t nx = scharge.size(0);
+                const uint32_t ny = scharge.size(1);
+                const double x0_sc = SC_RAMP_START_M_META;
+                const double L_sc = SC_RAMP_LEN_M_META;
+                const double inv_L = (L_sc > 0.0) ? (1.0 / L_sc) : 0.0;
+                const double x_origin = scharge.origo(0);
+                const double hx = scharge.h();
+                const double q_C_plot = q_C;
+                const double inv_q = (q_C_plot > 0.0) ? (1.0 / q_C_plot) : 0.0;
+                const int norm_density = envi("DENSITY_NORM", 1);
+                const int log_density = envi("DENSITY_LOG10", 0);
+                const double dens_floor = envd("DENSITY_FLOOR", -1.0);
+                const double dens_floor_frac = envd("DENSITY_FLOOR_FRAC", 1.0e-6);
+                double max_nion = 0.0;
+
+                for (uint32_t i = 0; i < nx; ++i) {
+                    const double x = x_origin + hx * i;
+                    double f = 1.0;
+                    if (SC_FACTOR_META != 1.0 && x >= x0_sc) {
+                        if (L_sc > 0.0) {
+                            double t = (x - x0_sc) * inv_L;
+                            t = std::clamp(t, 0.0, 1.0);
+                            f = 1.0 + (SC_FACTOR_META - 1.0) * t;
+                        } else {
+                            f = SC_FACTOR_META;
+                        }
+                    }
+                    const double inv_f = (f != 0.0) ? (1.0 / f) : 0.0;
+                    for (uint32_t j = 0; j < ny; ++j) {
+                        const double rho = scharge(i, j);  // scaled charge density
+                        const double rho_raw = rho * inv_f;
+                        const double val = std::fabs(rho_raw) * inv_q;
+                        nion(i, j) = val;
+                        if (val > max_nion) max_nion = val;
+                    }
+                }
+                double floor_use = dens_floor;
+                if (log_density) {
+                    if (!(floor_use > 0.0) && max_nion > 0.0) {
+                        floor_use = max_nion * dens_floor_frac;
+                    }
+                    if (!(floor_use > 0.0)) floor_use = 1.0;
+                    double max_log = -std::numeric_limits<double>::infinity();
+                    for (uint32_t i = 0; i < nx; ++i) {
+                        for (uint32_t j = 0; j < ny; ++j) {
+                            const double v = std::max(nion(i, j), floor_use);
+                            const double lv = std::log10(v);
+                            nion(i, j) = lv;
+                            if (lv > max_log) max_log = lv;
+                        }
+                    }
+                    max_nion = std::isfinite(max_log) ? max_log : 0.0;
+                }
+                if (norm_density && max_nion > 0.0) {
+                    for (uint32_t i = 0; i < nx; ++i) {
+                        for (uint32_t j = 0; j < ny; ++j) {
+                            nion(i, j) /= max_nion;
+                        }
+                    }
+                }
+                std::printf("[density] max_nion=%g floor=%g (norm=%d log10=%d)\n",
+                            max_nion, floor_use, norm_density, log_density);
+
+                const char* gridname_c = std::getenv("DENSITY_GRID_NAME")
+                                             ? std::getenv("DENSITY_GRID_NAME")
+                                             : "ion_density_grid.dat";
+                const std::string gridpath = outdir + "/" + basename_only(gridname_c);
+                const int stride = std::max(1, envi("DENSITY_GRID_STRIDE", 1));
+                const double y_origin = scharge.origo(1);
+                std::ofstream gd(gridpath);
+                gd << "# ion_density_grid\n";
+                gd << "# nx " << nx << " ny " << ny << "\n";
+                gd << "# x0 " << std::setprecision(10) << x_origin
+                   << " y0 " << y_origin
+                   << " h " << hx
+                   << " stride " << stride << "\n";
+                gd << "# norm " << norm_density
+                   << " log10 " << log_density
+                   << " floor " << std::setprecision(10) << floor_use << "\n";
+                for (uint32_t j = 0; j < ny; j += stride) {
+                    for (uint32_t i = 0; i < nx; i += stride) {
+                        gd << std::setprecision(10) << nion(i, j);
+                        if (i + stride < nx) gd << " ";
+                    }
+                    gd << "\n";
+                }
+                std::printf("wrote density grid: %s\n", gridpath.c_str());
+            }
         }
 
         t_after_png = SteadyClock::now();
@@ -1569,39 +1704,56 @@ const double P_sys_norm_sm = P_sys_norm_ag;
         gp.plot_png(png.c_str());
         std::printf("wrote PNG: %s\n", png.c_str());
 
-        // Close-up
+        // Close-up (per beamlet pair when multiple apertures)
         const double pad = envd("CLOSE_PAD_M", 5e-4);
         double x0 = xs0 - pad;
         double x1 = xa1 + pad;
         double max_delta = std::max({ g_scr_du*g_scr_mu, g_scr_dd*g_scr_md,
                                       g_acc_du*g_acc_mu, g_acc_dd*g_acc_md });
-        double y_min = 0.0, y_max = 0.0;
-        if (!g_scr_offs.empty() || !g_acc_offs.empty()) {
-            y_min = 1.0e100; y_max = -1.0e100;
-            for (double yv : g_scr_offs) { y_min = std::min(y_min, yv); y_max = std::max(y_max, yv); }
-            for (double yv : g_acc_offs) { y_min = std::min(y_min, yv); y_max = std::max(y_max, yv); }
+
+        auto plot_closeup = [&](double ylo, double yhi, const std::string &outpath) {
+            const double y_center = 0.5 * (ylo + yhi);
+            const double y_span = std::max(std::fabs(ylo - y_center),
+                                           std::fabs(yhi - y_center));
+            double ymax_local = y_span + a_max + max_delta + pad;
+            double y0 = y_center - ymax_local, y1 = y_center + ymax_local;
+
+            const int   BASE = envi("CLOSE_BASE_PX", 800);
+            const double xr = x1 - x0, yr = y1 - y0;
+            const int   H = BASE;
+            const int   W = std::max(1, int(std::lround(BASE * (xr/yr))));
+
+            GeomPlotter gpc(geom);
+            gpc.set_view(VIEW_XY, -1);
+            gpc.set_ranges(x0, y0, x1, y1);
+            gpc.set_size(W, H);
+            gpc.set_font_size(FONT_PX);
+            gpc.plot_png(outpath.c_str());
+        };
+
+        std::vector<std::pair<double,double>> close_pairs;
+        close_pairs.reserve(ap_pairs.size());
+        const double eps = 1.0e-12;
+        for (const auto &p : ap_pairs) {
+            const double y_center = 0.5 * (p.first + p.second);
+            if (y_center >= -eps) {
+                close_pairs.push_back(p);
+            }
         }
-        const double y_center = 0.5 * (y_min + y_max);
-        const double y_span = std::max(std::fabs(y_min - y_center),
-                                       std::fabs(y_max - y_center));
-        double ymax_local = y_span + a_max + max_delta + pad;
-        double y0 = y_center - ymax_local, y1 = y_center + ymax_local;
+        if (close_pairs.empty() && !ap_pairs.empty()) {
+            close_pairs.push_back(ap_pairs.front());
+        }
 
-        const int   BASE = envi("CLOSE_BASE_PX", 800);
-        const double xr = x1 - x0, yr = y1 - y0;
-        const int   H = BASE;
-        const int   W = std::max(1, int(std::lround(BASE * (xr/yr))));
-
-        GeomPlotter gpc(geom);
-        gpc.set_view(VIEW_XY, -1);
-        gpc.set_ranges(x0, y0, x1, y1);
-        gpc.set_size(W, H);
-	gpc.set_font_size(FONT_PX);
-
-        // write close-up next to main PNG in results dir
-        std::string close = add_suffix_before_ext(png, "_closeup");
-        gpc.plot_png(close.c_str());
-        std::printf("wrote PNG (close-up): %s\n", close.c_str());
+        for (size_t ci = 0; ci < close_pairs.size(); ++ci) {
+            const double ylo = std::min(close_pairs[ci].first, close_pairs[ci].second);
+            const double yhi = std::max(close_pairs[ci].first, close_pairs[ci].second);
+            std::string close = add_suffix_before_ext(png, "_closeup");
+            if (ci > 0) {
+                close = add_suffix_before_ext(png, "_closeup_p" + std::to_string(ci));
+            }
+            plot_closeup(ylo, yhi, close);
+            std::printf("wrote PNG (close-up): %s\n", close.c_str());
+        }
         t_after_png = SteadyClock::now();
     }
 
