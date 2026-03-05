@@ -36,7 +36,7 @@ ARRAY_CONC=1
 
 # Results root & run name prefix
 RESULTS_DIR="${RESULTS_DIR:-$PWD/results}"
-RUN_PREFIX="two_grid_Convergence_Study_FullTube_MultiAperture_MaxTurningRadius_densityvis"
+RUN_PREFIX="two_grid_Convergence_Study_FullTube_SingleAperture_MaxTurningRadius_Wing_Expansion"
 RUN_STAMP="${RUN_STAMP:-$(date +%Y%m%d_%H%M%S)}"
 
 # ---- Stage-1 verticality sampling knobs (passed to compute jobs) ----
@@ -50,14 +50,15 @@ VERT_THRESH_DEG=2.0
 # ---- Base geometry (non-swept defaults) ----
 H=1e-4
 X_LEFT_M=2e-3
-X_RIGHT_M="${X_RIGHT_M:-0.02}"
+X_RIGHT_M="${X_RIGHT_M:-0.55}"
 # Physical tube/sample length used for envelope projection (can exceed X_RIGHT_M)
 X_RIGHT_PHYS_M="${X_RIGHT_PHYS_M:-0.55}"
 YBOX_M=0.086
 ACCEL_OFF_Y_M=0.0
 SCREEN_OFF_Y_M=0.0
 SPLIT_AP_RAD="${SPLIT_AP_RAD:-0}"
-APERTURE_PAIRS_M="${APERTURE_PAIRS_M:-0.0:0.0, 0.0347:0.0350, 0.0397:0.0400, 0.0447:0.0450}"
+#APERTURE_PAIRS_M="${APERTURE_PAIRS_M:-0.0:0.0:0.00, 0.005:0.0051:0.00, 0.0375:0.038:0.00, 0.0420:0.0425:0.0015}"
+APERTURE_PAIRS_M="${APERTURE_PAIRS_M:-0.0420:0.0426:0.0015}"
 APERTURE_MIRROR="${APERTURE_MIRROR:-1}"
 
 # Offset sweep controls (defaults = single value at the base offsets)
@@ -134,8 +135,8 @@ SCR_UP_DEPTH_LIST=(0.0)
 SCR_UP_ANGLE_LIST=(0.0)
 SCR_DN_DEPTH_LIST=(0.0) #0.002 0.003 0.004)
 SCR_DN_ANGLE_LIST=(0) #20 45)
-ACC_UP_DEPTH_LIST=(0.0) #0.002 0.003 0.004)
-ACC_UP_ANGLE_LIST=(0) #20 45)
+ACC_UP_DEPTH_LIST=(0.002) #0.002 0.003 0.004)
+ACC_UP_ANGLE_LIST=(5) #20 45)
 ACC_DN_DEPTH_LIST=(0.0026)
 ACC_DN_ANGLE_LIST=(5)
 
@@ -1871,3 +1872,4 @@ fi
 
 echo "[orchestrator] Submitted. Monitor:"
 echo "  squeue -u $USER -o \"%.10i %.5t %12j %8A %8a %20S\""
+
