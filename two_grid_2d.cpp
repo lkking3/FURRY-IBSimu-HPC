@@ -101,6 +101,19 @@ static void split_tokens(const std::string &s, std::vector<std::string> &out) {
     }
     if (!cur.empty()) out.push_back(cur);
 }
+static void split_tokens(const std::string &s, std::vector<std::string> &out, char delim) {
+    std::string cur;
+    for (char c : s) {
+        if (c == delim) {
+            if (!cur.empty()) out.push_back(cur);
+            cur.clear();
+            continue;
+        }
+        if (std::isspace(static_cast<unsigned char>(c))) continue;
+        cur.push_back(c);
+    }
+    if (!cur.empty()) out.push_back(cur);
+}
 
 // mkdir -p helpers
 static int mkdir_one(const std::string &p) {
@@ -153,8 +166,8 @@ static std::string add_suffix_before_ext(const std::string &path, const std::str
 
 
 // ---------- globals for FuncSolid ----------
-static double g_a_scr    = 0.0;   // screen aperture radius [m]
-static double g_a_acc    = 0.0;   // accel  aperture radius [m]
+static double g_a_scr    = 0.0;   // screen aperture radius [m] (mean/default)
+static double g_a_acc    = 0.0;   // accel  aperture radius [m] (mean/default)
 static double g_xs0      = 0.0;   // screen start x
 static double g_xs1      = 0.0;   // screen end x
 static double g_xa0      = 0.0;   // accel start x
@@ -163,6 +176,8 @@ static double g_off      = 0.0;   // accelerator aperture y-offset [m]
 static double g_scr_off  = 0.0;   // screen aperture y-offset [m]
 static std::vector<double> g_acc_offs;
 static std::vector<double> g_scr_offs;
+static std::vector<double> g_acc_rads;
+static std::vector<double> g_scr_rads;
 
 // screen chamfers (upstream & downstream)
 static double g_scr_du = 0.0, g_scr_mu = 0.0; // depth & slope upstream
@@ -192,9 +207,9 @@ static inline void clamp_biface(double t, double &du, double &dd, bool &scaled) 
     }
 }
 
-// half-height of open slot (aperture) as function of x inside each plate
-static inline double screen_a_eff(double x) {
-    double ae = g_a_scr;
+// chamfer-driven aperture widening (delta radius) as function of x
+static inline double screen_delta(double x) {
+    double ae = 0.0;
     // upstream face at x = g_xs0, chamfer zone: [xs0, xs0+du]
     if (g_scr_du > 0.0 && g_scr_mu > 0.0) {
         const double xu_end = g_xs0 + g_scr_du;
@@ -207,8 +222,8 @@ static inline double screen_a_eff(double x) {
     }
     return ae;
 }
-static inline double accel_a_eff(double x) {
-    double ae = g_a_acc;
+static inline double accel_delta(double x) {
+    double ae = 0.0;
     // upstream face at x = g_xa0, chamfer zone: [xa0, xa0+du]
     if (g_acc_du > 0.0 && g_acc_mu > 0.0) {
         const double xu_end = g_xa0 + g_acc_du;
@@ -222,20 +237,25 @@ static inline double accel_a_eff(double x) {
     return ae;
 }
 
-static inline bool in_any_aperture(double y, const std::vector<double> &offs, double a_eff) {
-    for (double off : offs) {
-        if (std::fabs(y - off) < a_eff) return true;
+static inline bool in_any_aperture(double y,
+                                   const std::vector<double> &offs,
+                                   const std::vector<double> &rads,
+                                   double delta) {
+    const size_t n = std::min(offs.size(), rads.size());
+    for (size_t i = 0; i < n; ++i) {
+        const double a_eff = rads[i] + delta;
+        if (std::fabs(y - offs[i]) < a_eff) return true;
     }
     return false;
 }
 
 // --------- solids: grids ----------
 static bool screen_fn(double x, double y, double /*z*/) {
-    if (x >= g_xs0 && x <= g_xs1) return !in_any_aperture(y, g_scr_offs, screen_a_eff(x));
+    if (x >= g_xs0 && x <= g_xs1) return !in_any_aperture(y, g_scr_offs, g_scr_rads, screen_delta(x));
     return false;
 }
 static bool accel_fn(double x, double y, double /*z*/) {
-    if (x >= g_xa0 && x <= g_xa1) return !in_any_aperture(y, g_acc_offs, accel_a_eff(x));
+    if (x >= g_xa0 && x <= g_xa1) return !in_any_aperture(y, g_acc_offs, g_acc_rads, accel_delta(x));
     return false;
 }
 
@@ -282,56 +302,90 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
     // ----- multi-aperture offsets (paired screen:accel list) -----
     const std::string pairs_raw = envs("APERTURE_PAIRS_M", "");
     const int mirror_pairs = envi("APERTURE_MIRROR", 0);
-    std::vector<std::pair<double, double>> ap_pairs;
-    auto add_pair = [&](double s, double a) {
+    struct AperturePair {
+        double scr_off;
+        double acc_off;
+        double scr_rad;
+        double acc_rad;
+    };
+    std::vector<AperturePair> ap_pairs;
+    auto add_pair = [&](double s, double a, double rs, double ra) {
         const double eps = 1.0e-12;
         for (const auto &p : ap_pairs) {
-            if (std::fabs(p.first - s) <= eps && std::fabs(p.second - a) <= eps) {
+            if (std::fabs(p.scr_off - s) <= eps &&
+                std::fabs(p.acc_off - a) <= eps &&
+                std::fabs(p.scr_rad - rs) <= eps &&
+                std::fabs(p.acc_rad - ra) <= eps) {
                 return;
             }
         }
-        ap_pairs.emplace_back(s, a);
+        ap_pairs.push_back({s, a, rs, ra});
     };
 
     if (!pairs_raw.empty()) {
         std::vector<std::string> toks;
         split_tokens(pairs_raw, toks);
         for (const auto &tok : toks) {
-            const size_t pos = tok.find(':');
-            if (pos == std::string::npos) continue;
-            const std::string s0 = tok.substr(0, pos);
-            const std::string s1 = tok.substr(pos + 1);
-            double s = 0.0, a = 0.0;
-            if (parse_double_str(s0, s) && parse_double_str(s1, a)) {
-                add_pair(s, a);
+            std::vector<std::string> parts;
+            split_tokens(tok, parts, ':');
+            if (parts.size() < 2 || parts.size() > 3) continue;
+            double s = 0.0, a = 0.0, r = 0.0;
+            if (!parse_double_str(parts[0], s) || !parse_double_str(parts[1], a)) {
+                continue;
             }
+            bool have_r = (parts.size() == 3) && parse_double_str(parts[2], r) && (r > 0.0);
+            const double rs = have_r ? r : a_scr;
+            const double ra = have_r ? r : a_acc;
+            add_pair(s, a, rs, ra);
         }
     }
 
     if (ap_pairs.empty()) {
-        add_pair(scr_off_y, off_y);
+        add_pair(scr_off_y, off_y, a_scr, a_acc);
     }
 
     if (mirror_pairs && !pairs_raw.empty()) {
         const double eps = 1.0e-12;
         const size_t n0 = ap_pairs.size();
         for (size_t i = 0; i < n0; ++i) {
-            const double s = ap_pairs[i].first;
-            const double a = ap_pairs[i].second;
+            const double s = ap_pairs[i].scr_off;
+            const double a = ap_pairs[i].acc_off;
+            const double rs = ap_pairs[i].scr_rad;
+            const double ra = ap_pairs[i].acc_rad;
             if (std::fabs(s) <= eps && std::fabs(a) <= eps) continue;
-            add_pair(-s, -a);
+            add_pair(-s, -a, rs, ra);
         }
     }
 
     std::vector<double> scr_off_list;
     std::vector<double> acc_off_list;
+    std::vector<double> scr_rad_list;
+    std::vector<double> acc_rad_list;
     scr_off_list.reserve(ap_pairs.size());
     acc_off_list.reserve(ap_pairs.size());
+    scr_rad_list.reserve(ap_pairs.size());
+    acc_rad_list.reserve(ap_pairs.size());
     for (const auto &p : ap_pairs) {
-        scr_off_list.push_back(p.first);
-        acc_off_list.push_back(p.second);
+        scr_off_list.push_back(p.scr_off);
+        acc_off_list.push_back(p.acc_off);
+        scr_rad_list.push_back(p.scr_rad);
+        acc_rad_list.push_back(p.acc_rad);
     }
     const int N_APERTURES = (int)ap_pairs.size();
+
+    double scr_rad_sum = 0.0;
+    double acc_rad_sum = 0.0;
+    double scr_rad_max = a_scr;
+    double acc_rad_max = a_acc;
+    for (size_t i = 0; i < scr_rad_list.size(); ++i) {
+        scr_rad_sum += scr_rad_list[i];
+        acc_rad_sum += acc_rad_list[i];
+        scr_rad_max = std::max(scr_rad_max, scr_rad_list[i]);
+        acc_rad_max = std::max(acc_rad_max, acc_rad_list[i]);
+    }
+    const double a_scr_mean = (!scr_rad_list.empty()) ? (scr_rad_sum / scr_rad_list.size()) : a_scr;
+    const double a_acc_mean = (!acc_rad_list.empty()) ? (acc_rad_sum / acc_rad_list.size()) : a_acc;
+    const double a_max = std::max(scr_rad_max, acc_rad_max);
 
     // ----- electrical potentials -----
     const double VS_V     = envd("VS_V", 0.0);   // screen potential [V]
@@ -384,7 +438,7 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
     const double amu  = 1.66053906660e-27;     // [kg]
     const double q_C  = std::fabs(ION_Q_E) * qe;
     const double m_kg = std::fabs(ION_M_AMU) * amu;
-    const double A_ap_m2 = M_PI * a_scr * a_scr;
+    const double A_ap_m2 = M_PI * a_scr_mean * a_scr_mean;
 
     double P_CL_A_per_V32 = 0.0;
     double I_CL_A = 0.0;
@@ -420,8 +474,8 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
     const double acc_md = std::tan(deg2rad(std::max(acc_da, 0.0)));
 
     // Push globals
-    g_a_scr = a_scr;
-    g_a_acc = a_acc;
+    g_a_scr = a_scr_mean;
+    g_a_acc = a_acc_mean;
     g_xs0 = xs0; g_xs1 = xs1;
     g_xa0 = xa0; g_xa1 = xa1;
     if (acc_off_list.empty()) acc_off_list.push_back(off_y);
@@ -430,6 +484,8 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
     g_scr_off = scr_off_list.front();
     g_acc_offs = acc_off_list;
     g_scr_offs = scr_off_list;
+    g_acc_rads = acc_rad_list;
+    g_scr_rads = scr_rad_list;
 
     g_scr_du = scr_du; g_scr_mu = scr_mu;
     g_scr_dd = scr_dd; g_scr_md = scr_md;
@@ -438,7 +494,6 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
 
     // Tube/holder sizing
     const double max_delta = std::max({ scr_du*scr_mu, scr_dd*scr_md, acc_du*acc_mu, acc_dd*acc_md });
-    const double a_max = std::max(a_scr, a_acc);
     double off_abs = 0.0;
     for (double v : acc_off_list) off_abs = std::max(off_abs, std::fabs(v));
     for (double v : scr_off_list) off_abs = std::max(off_abs, std::fabs(v));
@@ -569,6 +624,8 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             };
             write_list("SCREEN_OFF_LIST_M", g_scr_offs);
             write_list("ACCEL_OFF_LIST_M", g_acc_offs);
+            write_list("SCREEN_RAD_LIST_M", g_scr_rads);
+            write_list("ACCEL_RAD_LIST_M", g_acc_rads);
         }
         m << "  \"X_LEFT_M\":" << x_left << ",\n";
         m << "  \"X_RIGHT_M\":" << x_right << ",\n";
@@ -654,8 +711,8 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
     std::printf("aperture radii: screen=%g accel=%g\n", a_scr, a_acc);
     std::printf("apertures: %d (mirror=%d)\n", N_APERTURES, mirror_pairs);
     std::printf("aperture_pairs_m:");
-    for (size_t i = 0; i < ap_pairs.size(); ++i) {
-        std::printf(" %g:%g", ap_pairs[i].first, ap_pairs[i].second);
+            for (size_t i = 0; i < ap_pairs.size(); ++i) {
+        std::printf(" %g:%g:%g", ap_pairs[i].scr_off, ap_pairs[i].acc_off, ap_pairs[i].scr_rad);
     }
     std::printf("\n");
     if (scr_scaled) std::printf("NOTE: screen chamfers scaled to fit thickness\n");
@@ -768,9 +825,12 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                 efield.recalculate();
 
                 pdb.clear();
-                for (double off : g_scr_offs) {
-                    const double y_lo = off - a_scr;
-                    const double y_hi = off + a_scr;
+                const size_t n_ap = std::min(g_scr_offs.size(), g_scr_rads.size());
+                for (size_t ai = 0; ai < n_ap; ++ai) {
+                    const double off = g_scr_offs[ai];
+                    const double rad = g_scr_rads[ai];
+                    const double y_lo = off - rad;
+                    const double y_hi = off + rad;
                     pdb.add_2d_beam_with_energy(
                         (uint32_t)n_part_per,
                         J_Apm2,        // current density [A/m^2]
@@ -819,7 +879,7 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             }
             // ====== Beam diagnostics: currents + collimation ======
             // Only meaningful when ions are enabled and pdb is populated.
-            const double Leff = 0.785 * (2.0 * a_scr);
+            const double Leff = 0.785 * (2.0 * g_a_scr);
             // Helper: total current and basic width at a given x-plane
 
             auto current_and_width_at_plane = [&](double xpos,
@@ -878,6 +938,69 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                 }
             };
 
+            // Same as above, but only for particles within a y-window (e.g., sample holder height).
+            auto current_and_width_at_plane_window = [&](double xpos,
+                                                        double y_min,
+                                                        double y_max,
+                                                        double &Itot,
+                                                        double &y_mean,
+                                                        double &y_rms0,
+                                                        double &y_rms_c,
+                                                        double &y_absmax,
+                                                        double &y_absmax_c) {
+                TrajectoryDiagnosticData tdata;
+                std::vector<trajectory_diagnostic_e> diag;
+                diag.push_back(DIAG_Y);
+                diag.push_back(DIAG_CURR);
+
+                pdb.trajectories_at_plane(tdata, AXIS_X, xpos, diag);
+
+                const std::vector<double> &y    = tdata(0).data();
+                const std::vector<double> &curr = tdata(1).data();
+
+                Itot     = 0.0;
+                y_mean   = 0.0;
+                y_rms0   = 0.0;
+                y_rms_c  = 0.0;
+                y_absmax = 0.0;
+                y_absmax_c = 0.0;
+
+                const size_t N = curr.size();
+                double sum_wy = 0.0;
+                double sum_wy2 = 0.0;
+                const double ylo = std::min(y_min, y_max);
+                const double yhi = std::max(y_min, y_max);
+                for (size_t i = 0; i < N; ++i) {
+                    const double yy = y[i];
+                    if (yy < ylo || yy > yhi) continue;
+                    const double w  = curr[i];
+                    const double ay = std::fabs(yy);
+
+                    Itot   += w;
+                    sum_wy += w * yy;
+                    sum_wy2 += w * yy * yy;
+                    if (ay > y_absmax) y_absmax = ay;
+                }
+
+                if (Itot > 0.0) {
+                    y_mean = sum_wy / Itot;
+                    y_rms0 = std::sqrt(sum_wy2 / Itot);
+                    const double var = (sum_wy2 / Itot) - (y_mean * y_mean);
+                    y_rms_c = (var > 0.0) ? std::sqrt(var) : 0.0;
+                    for (size_t i = 0; i < N; ++i) {
+                        const double yy = y[i];
+                        if (yy < ylo || yy > yhi) continue;
+                        const double dy = std::fabs(yy - y_mean);
+                        if (dy > y_absmax_c) y_absmax_c = dy;
+                    }
+                } else {
+                    y_mean = 0.0;
+                    y_rms0 = 0.0;
+                    y_rms_c = 0.0;
+                    y_absmax_c = 0.0;
+                }
+            };
+
             // ---- 2.1 Currents at PG entrance, AG exit, sample wall ----
 
             // Planes:
@@ -899,7 +1022,16 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             current_and_width_at_plane(x_ag_plane, I_ag_out_Apm, ymean_ag, yr_ag,  yr_ag_c,  ymax_ag, ymax_ag_c);
             if (endplate_enabled) {
 
-                current_and_width_at_plane(x_sm_plane, I_sm_Apm, ymean_sm, yr_sm, yr_sm_c, ymax_sm, ymax_sm_c);
+                if (holder_enabled) {
+                    current_and_width_at_plane_window(
+                        x_sm_plane,
+                        -g_holder_hh,
+                        g_holder_hh,
+                        I_sm_Apm, ymean_sm, yr_sm, yr_sm_c, ymax_sm, ymax_sm_c
+                    );
+                } else {
+                    current_and_width_at_plane(x_sm_plane, I_sm_Apm, ymean_sm, yr_sm, yr_sm_c, ymax_sm, ymax_sm_c);
+                }
 
             }
             // 3D estimates in amps using Leff
@@ -1576,13 +1708,13 @@ const double P_sys_norm_sm = P_sys_norm_ag;
             close_pairs.reserve(ap_pairs.size());
             const double eps = 1.0e-12;
             for (const auto &p : ap_pairs) {
-                const double y_center = 0.5 * (p.first + p.second);
+                const double y_center = 0.5 * (p.scr_off + p.acc_off);
                 if (y_center >= -eps) {
-                    close_pairs.push_back(p);
+                    close_pairs.emplace_back(p.scr_off, p.acc_off);
                 }
             }
             if (close_pairs.empty() && !ap_pairs.empty()) {
-                close_pairs.push_back(ap_pairs.front());
+                close_pairs.emplace_back(ap_pairs.front().scr_off, ap_pairs.front().acc_off);
             }
 
             for (size_t ci = 0; ci < close_pairs.size(); ++ci) {
@@ -1735,13 +1867,13 @@ const double P_sys_norm_sm = P_sys_norm_ag;
         close_pairs.reserve(ap_pairs.size());
         const double eps = 1.0e-12;
         for (const auto &p : ap_pairs) {
-            const double y_center = 0.5 * (p.first + p.second);
+            const double y_center = 0.5 * (p.scr_off + p.acc_off);
             if (y_center >= -eps) {
-                close_pairs.push_back(p);
+                close_pairs.emplace_back(p.scr_off, p.acc_off);
             }
         }
         if (close_pairs.empty() && !ap_pairs.empty()) {
-            close_pairs.push_back(ap_pairs.front());
+            close_pairs.emplace_back(ap_pairs.front().scr_off, ap_pairs.front().acc_off);
         }
 
         for (size_t ci = 0; ci < close_pairs.size(); ++ci) {
@@ -1783,3 +1915,4 @@ catch (Error &e) {
     e.print_error_message(std::cerr, true);
     return 1;
 }
+
