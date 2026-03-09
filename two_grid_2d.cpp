@@ -1002,6 +1002,8 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             };
 
             // ---- 2.1 Currents at PG entrance, AG exit, sample wall ----
+            const double sample_diam_m = envd("SAMPLE_DIAM_M", 6.35e-2);
+            const double sample_rad_m = 0.5 * sample_diam_m;
 
             // Planes:
             //  - PG entrance: upstream face of plasma/screen plate
@@ -1011,8 +1013,8 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             const double x_pg_plane = xs0 + 0.5*h;
             const double x_ag_plane = xa1 + 0.5*h;
             const double x_sm_plane = endplate_enabled
-                                          ? (holder_enabled ? (g_holder_x0 - 0.5*h) : (g_tube_x1 - 0.5*h))
-                                          : std::numeric_limits<double>::quiet_NaN();
+                                            ? (holder_enabled ? (g_holder_x0 - 0.5*h) : (g_tube_x1 - 0.5*h))
+                                            : std::numeric_limits<double>::quiet_NaN();
 
             double I_pg_in_Apm  = 0.0, ymean_pg = 0.0, yr_pg  = 0.0, yr_pg_c  = 0.0, ymax_pg  = 0.0, ymax_pg_c  = 0.0;
             double I_ag_out_Apm = 0.0, ymean_ag = 0.0, yr_ag  = 0.0, yr_ag_c  = 0.0, ymax_ag  = 0.0, ymax_ag_c  = 0.0;
@@ -1021,139 +1023,196 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             current_and_width_at_plane(x_pg_plane, I_pg_in_Apm,  ymean_pg,  yr_pg,  yr_pg_c,  ymax_pg, ymax_pg_c);
             current_and_width_at_plane(x_ag_plane, I_ag_out_Apm, ymean_ag, yr_ag,  yr_ag_c,  ymax_ag, ymax_ag_c);
             if (endplate_enabled) {
-
-                if (holder_enabled) {
+                double sample_half = sample_rad_m;
+                if (holder_enabled && g_holder_hh > 0.0) {
+                    if (sample_half > 0.0) {
+                        sample_half = std::min(sample_half, g_holder_hh);
+                    } else {
+                        sample_half = g_holder_hh;
+                    }
+                }
+                if (sample_half > 0.0) {
                     current_and_width_at_plane_window(
                         x_sm_plane,
-                        -g_holder_hh,
-                        g_holder_hh,
+                        -sample_half,
+                        sample_half,
                         I_sm_Apm, ymean_sm, yr_sm, yr_sm_c, ymax_sm, ymax_sm_c
                     );
                 } else {
                     current_and_width_at_plane(x_sm_plane, I_sm_Apm, ymean_sm, yr_sm, yr_sm_c, ymax_sm, ymax_sm_c);
                 }
-
             }
             // 3D estimates in amps using Leff
             const double I_pg_in_A  = I_pg_in_Apm  * Leff;
             const double I_ag_out_A = I_ag_out_Apm * Leff;
             const double I_sm_A     = I_sm_Apm     * Leff;
+            const double grid_loss_Apm = std::max(0.0, I_pg_in_Apm - I_ag_out_Apm);
+            const double grid_loss_A   = grid_loss_Apm * Leff;
+            const double grid_transmission_frac = (I_pg_in_A > 0.0)
+                                                    ? std::max(0.0, std::min(1.0, I_ag_out_A / I_pg_in_A))
+                                                    : 0.0;
+            const double grid_loss_frac = (I_pg_in_A > 0.0)
+                                            ? std::max(0.0, 1.0 - grid_transmission_frac)
+                                            : 0.0;
 
             std::printf("[beam] currents: "
                         "PG entrance = %.3e A/m (%.3e A), "
                         "AG exit = %.3e A/m (%.3e A), "
-                        "sample = %.3e A/m (%.3e A)\n",
+                        "sample = %.3e A/m (%.3e A), "
+                        "grid loss = %.3e A (frac=%.3e)\n",
                         I_pg_in_Apm,  I_pg_in_A,
                         I_ag_out_Apm, I_ag_out_A,
-                        I_sm_Apm,     I_sm_A);
+                        I_sm_Apm,     I_sm_A,
+                        grid_loss_A,  grid_loss_frac);
 
             // ---- 2.1a Sample radial/diameter profile ----
-            {
-                const double sample_diam_m = envd("SAMPLE_DIAM_M", 6.35e-2);
-                const double sample_rad_m = 0.5 * sample_diam_m;
-                const double sample_bin_m = envd("SAMPLE_BIN_M", 5.0e-4);
-                const int allow_trunc_profile = envi("SAMPLE_PROFILE_ALLOW_TRUNC", 1);
-                const double x_profile_env = envd("SAMPLE_PROFILE_X_M", std::numeric_limits<double>::quiet_NaN());
-                const double x_profile_plane = std::isfinite(x_profile_env)
-                                                   ? x_profile_env
-                                                   : (endplate_enabled ? x_sm_plane : (xmax - 0.5*h));
-                const bool profile_ok = endplate_enabled || (allow_trunc_profile != 0);
+              {
+                  const double sample_bin_m = envd("SAMPLE_BIN_M", 5.0e-4);
+                  const double sample_leak_pad_m = envd("SAMPLE_LEAK_PAD_M", 3.0e-3);
+                  const int allow_trunc_profile = envi("SAMPLE_PROFILE_ALLOW_TRUNC", 1);
+                  const double x_profile_env = envd("SAMPLE_PROFILE_X_M", std::numeric_limits<double>::quiet_NaN());
+                  const double x_profile_plane = std::isfinite(x_profile_env)
+                                                     ? x_profile_env
+                                                     : (endplate_enabled ? x_sm_plane : (xmax - 0.5*h));
+                  const bool profile_ok = endplate_enabled || (allow_trunc_profile != 0);
 
-                if (profile_ok && sample_rad_m > 0.0 && sample_bin_m > 0.0 &&
-                    x_profile_plane > (xmin + 0.5*h) && x_profile_plane < (xmax - 0.5*h)) {
-                    TrajectoryDiagnosticData tdata;
-                    std::vector<trajectory_diagnostic_e> diag;
-                    diag.push_back(DIAG_Y);
-                    diag.push_back(DIAG_CURR);
-                    pdb.trajectories_at_plane(tdata, AXIS_X, x_profile_plane, diag);
+                  if (profile_ok && sample_rad_m > 0.0 && sample_bin_m > 0.0 &&
+                      x_profile_plane > (xmin + 0.5*h) && x_profile_plane < (xmax - 0.5*h)) {
+                      TrajectoryDiagnosticData tdata;
+                      std::vector<trajectory_diagnostic_e> diag;
+                      diag.push_back(DIAG_Y);
+                      diag.push_back(DIAG_CURR);
+                      pdb.trajectories_at_plane(tdata, AXIS_X, x_profile_plane, diag);
 
-                    const std::vector<double> &y    = tdata(0).data();
-                    const std::vector<double> &curr = tdata(1).data();
-                    const size_t N = curr.size();
+                      const std::vector<double> &y    = tdata(0).data();
+                      const std::vector<double> &curr = tdata(1).data();
+                      const size_t N = curr.size();
 
-                    const int nbins_r = (int)std::ceil(sample_rad_m / sample_bin_m);
-                    const int nbins_y = (int)std::ceil((2.0 * sample_rad_m) / sample_bin_m);
-                    if (nbins_r > 0 && nbins_y > 0) {
-                        std::vector<double> bin_curr_r(nbins_r, 0.0);
-                        std::vector<size_t> bin_cnt_r(nbins_r, 0);
-                        std::vector<double> bin_curr_y(nbins_y, 0.0);
-                        std::vector<size_t> bin_cnt_y(nbins_y, 0);
-                        double sum_curr = 0.0;
+                      const double y_profile_min = -sample_rad_m - std::max(0.0, sample_leak_pad_m);
+                      const double y_profile_max =  sample_rad_m + std::max(0.0, sample_leak_pad_m);
+                      const double y_profile_span = y_profile_max - y_profile_min;
+                      const int nbins_y = (int)std::ceil(y_profile_span / sample_bin_m);
+                      if (nbins_y > 0) {
+                          std::vector<double> bin_curr_y(nbins_y, 0.0);
+                          std::vector<size_t> bin_cnt_y(nbins_y, 0);
+                          double sum_curr_in = 0.0;
+                          double sum_curr_out = 0.0;
+                          double sum_curr_all = 0.0;
 
-                        for (size_t i = 0; i < N; ++i) {
-                            const double yy = y[i];
-                            const double r = std::fabs(yy);
-                            if (r > sample_rad_m) {
-                                continue;
-                            }
-                            const double w = curr[i];
-                            sum_curr += w;
+                          for (size_t i = 0; i < N; ++i) {
+                              const double yy = y[i];
+                              const double r = std::fabs(yy);
+                              if (r > sample_rad_m + sample_leak_pad_m) {
+                                  continue;
+                              }
+                              const double w = curr[i];
+                              sum_curr_all += w;
 
-                            int idx_r = (int)std::floor(r / sample_bin_m);
-                            if (idx_r < 0) idx_r = 0;
-                            if (idx_r >= nbins_r) idx_r = nbins_r - 1;
-                            bin_curr_r[idx_r] += w;
-                            bin_cnt_r[idx_r] += 1;
+                              int idx_y = (int)std::floor((yy - y_profile_min) / sample_bin_m);
+                              if (idx_y < 0) idx_y = 0;
+                              if (idx_y >= nbins_y) idx_y = nbins_y - 1;
+                              bin_curr_y[idx_y] += w;
+                              bin_cnt_y[idx_y] += 1;
 
-                            const double y0 = -sample_rad_m;
-                            int idx_y = (int)std::floor((yy - y0) / sample_bin_m);
-                            if (idx_y < 0) idx_y = 0;
-                            if (idx_y >= nbins_y) idx_y = nbins_y - 1;
-                            bin_curr_y[idx_y] += w;
-                            bin_cnt_y[idx_y] += 1;
-                        }
+                              if (r <= sample_rad_m) {
+                                  sum_curr_in += w;
+                              } else {
+                                  sum_curr_out += w;
+                              }
+                          }
 
-                        std::ofstream pj(outdir + "/sample_radial_profile.json");
-                        pj << "{\n";
-                        pj << "  \"x_plane_m\": " << std::setprecision(10) << x_profile_plane << ",\n";
-                        pj << "  \"sample_diam_m\": " << std::setprecision(10) << sample_diam_m << ",\n";
-                        pj << "  \"sample_rad_m\": " << std::setprecision(10) << sample_rad_m << ",\n";
-                        pj << "  \"bin_width_m\": " << std::setprecision(10) << sample_bin_m << ",\n";
-                        pj << "  \"total_I_Apm\": " << std::setprecision(10) << sum_curr << ",\n";
-                        pj << "  \"total_I_A\": " << std::setprecision(10) << (sum_curr * Leff) << ",\n";
-                        pj << "  \"num_samples\": " << N << ",\n";
-                        pj << "  \"bins\": [\n";
-                        for (int b = 0; b < nbins_r; ++b) {
-                            const double r0 = b * sample_bin_m;
-                            const double r1 = (b + 1) * sample_bin_m;
-                            pj << "    {\"r_lo_m\": " << std::setprecision(10) << r0
-                               << ", \"r_hi_m\": " << std::setprecision(10) << r1
-                               << ", \"I_Apm\": " << std::setprecision(10) << bin_curr_r[b]
-                               << ", \"I_A\": " << std::setprecision(10) << (bin_curr_r[b] * Leff)
-                               << ", \"fraction\": ";
-                            if (sum_curr > 0.0) pj << std::setprecision(10) << (bin_curr_r[b] / sum_curr); else pj << "0";
-                            pj << ", \"count\": " << bin_cnt_r[b] << "}";
-                            if (b != nbins_r - 1) pj << ",";
-                            pj << "\n";
-                        }
-                        pj << "  ]\n";
-                        pj << "}\n";
+                          // Diameter profile stats (use in-sample bins only; I_A units)
+                          double peak_to_avg = std::numeric_limits<double>::quiet_NaN();
+                          double rms_nonuniform = std::numeric_limits<double>::quiet_NaN();
+                          double edge_peaking = std::numeric_limits<double>::quiet_NaN();
+                          double sum_in_bins = 0.0;
+                          double sumsq_in_bins = 0.0;
+                          double max_in = 0.0;
+                          double sum_outer = 0.0;
+                          double sum_inner = 0.0;
+                          int cnt_in = 0;
+                          int cnt_outer = 0;
+                          int cnt_inner = 0;
+                          for (int b = 0; b < nbins_y; ++b) {
+                              const double y0 = y_profile_min + b * sample_bin_m;
+                              const double y1 = y0 + sample_bin_m;
+                              const double ymid = 0.5 * (y0 + y1);
+                              const double rmid = std::fabs(ymid);
+                              if (rmid <= sample_rad_m) {
+                                  const double valA = bin_curr_y[b] * Leff;
+                                  sum_in_bins += valA;
+                                  sumsq_in_bins += valA * valA;
+                                  if (valA > max_in) max_in = valA;
+                                  cnt_in += 1;
+                                  if (rmid >= 0.9 * sample_rad_m) {
+                                      sum_outer += valA;
+                                      cnt_outer += 1;
+                                  }
+                                  if (rmid <= 0.5 * sample_rad_m) {
+                                      sum_inner += valA;
+                                      cnt_inner += 1;
+                                  }
+                              }
+                          }
+                          if (cnt_in > 0) {
+                              const double mean_in = sum_in_bins / (double)cnt_in;
+                              if (mean_in > 0.0) {
+                                  peak_to_avg = max_in / mean_in;
+                                  const double mean_sq = sumsq_in_bins / (double)cnt_in;
+                                  const double var = std::max(0.0, mean_sq - mean_in * mean_in);
+                                  rms_nonuniform = std::sqrt(var) / mean_in;
+                                  if (cnt_outer > 0 && cnt_inner > 0) {
+                                      const double mean_outer = sum_outer / (double)cnt_outer;
+                                      const double mean_inner = sum_inner / (double)cnt_inner;
+                                      if (mean_inner > 0.0) {
+                                          edge_peaking = mean_outer / mean_inner;
+                                      }
+                                  }
+                              }
+                          }
 
-                        std::ofstream dj(outdir + "/sample_diameter_profile.json");
-                        dj << "{\n";
-                        dj << "  \"x_plane_m\": " << std::setprecision(10) << x_profile_plane << ",\n";
-                        dj << "  \"sample_diam_m\": " << std::setprecision(10) << sample_diam_m << ",\n";
-                        dj << "  \"sample_rad_m\": " << std::setprecision(10) << sample_rad_m << ",\n";
-                        dj << "  \"bin_width_m\": " << std::setprecision(10) << sample_bin_m << ",\n";
-                        dj << "  \"total_I_Apm\": " << std::setprecision(10) << sum_curr << ",\n";
-                        dj << "  \"total_I_A\": " << std::setprecision(10) << (sum_curr * Leff) << ",\n";
-                        dj << "  \"num_samples\": " << N << ",\n";
-                        dj << "  \"bins\": [\n";
-                        for (int b = 0; b < nbins_y; ++b) {
-                            const double y0 = -sample_rad_m + b * sample_bin_m;
-                            const double y1 = y0 + sample_bin_m;
-                            dj << "    {\"y_lo_m\": " << std::setprecision(10) << y0
-                               << ", \"y_hi_m\": " << std::setprecision(10) << y1
-                               << ", \"I_Apm\": " << std::setprecision(10) << bin_curr_y[b]
-                               << ", \"I_A\": " << std::setprecision(10) << (bin_curr_y[b] * Leff)
-                               << ", \"fraction\": ";
-                            if (sum_curr > 0.0) dj << std::setprecision(10) << (bin_curr_y[b] / sum_curr); else dj << "0";
-                            dj << ", \"count\": " << bin_cnt_y[b] << "}";
-                            if (b != nbins_y - 1) dj << ",";
-                            dj << "\n";
-                        }
-                        dj << "  ]\n";
-                        dj << "}\n";
+                          std::ofstream dj(outdir + "/sample_diameter_profile.json");
+                          dj << "{\n";
+                          dj << "  \"x_plane_m\": " << std::setprecision(10) << x_profile_plane << ",\n";
+                          dj << "  \"sample_diam_m\": " << std::setprecision(10) << sample_diam_m << ",\n";
+                          dj << "  \"sample_rad_m\": " << std::setprecision(10) << sample_rad_m << ",\n";
+                          dj << "  \"leak_pad_m\": " << std::setprecision(10) << std::max(0.0, sample_leak_pad_m) << ",\n";
+                          dj << "  \"bin_width_m\": " << std::setprecision(10) << sample_bin_m << ",\n";
+                          dj << "  \"total_I_Apm\": " << std::setprecision(10) << sum_curr_all << ",\n";
+                          dj << "  \"total_I_A\": " << std::setprecision(10) << (sum_curr_all * Leff) << ",\n";
+                          dj << "  \"total_I_Apm_in\": " << std::setprecision(10) << sum_curr_in << ",\n";
+                          dj << "  \"total_I_Apm_out\": " << std::setprecision(10) << sum_curr_out << ",\n";
+                          dj << "  \"total_I_A_in\": " << std::setprecision(10) << (sum_curr_in * Leff) << ",\n";
+                          dj << "  \"total_I_A_out\": " << std::setprecision(10) << (sum_curr_out * Leff) << ",\n";
+                          dj << "  \"num_samples\": " << N << ",\n";
+                          dj << "  \"stats\": {"
+                             << "\"peak_to_avg\": " << std::setprecision(10) << peak_to_avg
+                             << ", \"rms_nonuniform\": " << std::setprecision(10) << rms_nonuniform
+                             << ", \"edge_peaking_index\": " << std::setprecision(10) << edge_peaking
+                             << ", \"leakage_I_A\": " << std::setprecision(10) << (sum_curr_out * Leff)
+                             << ", \"leakage_frac\": ";
+                          if (sum_curr_all > 0.0) dj << std::setprecision(10) << (sum_curr_out / sum_curr_all); else dj << "0";
+                          dj << ", \"outer_frac\": 0.1, \"inner_frac\": 0.5"
+                             << "},\n";
+                          dj << "  \"bins\": [\n";
+                          for (int b = 0; b < nbins_y; ++b) {
+                              const double y0 = y_profile_min + b * sample_bin_m;
+                              const double y1 = y0 + sample_bin_m;
+                              const double ymid = 0.5 * (y0 + y1);
+                              const bool in_sample = (std::fabs(ymid) <= sample_rad_m);
+                              dj << "    {\"y_lo_m\": " << std::setprecision(10) << y0
+                                 << ", \"y_hi_m\": " << std::setprecision(10) << y1
+                                 << ", \"I_Apm\": " << std::setprecision(10) << bin_curr_y[b]
+                                 << ", \"I_A\": " << std::setprecision(10) << (bin_curr_y[b] * Leff)
+                                 << ", \"fraction\": ";
+                              if (sum_curr_all > 0.0) dj << std::setprecision(10) << (bin_curr_y[b] / sum_curr_all); else dj << "0";
+                              dj << ", \"count\": " << bin_cnt_y[b]
+                                 << ", \"in_sample\": " << (in_sample ? "true" : "false") << "}";
+                              if (b != nbins_y - 1) dj << ",";
+                              dj << "\n";
+                          }
+                          dj << "  ]\n";
+                          dj << "}\n";
                     }
                 } else if (profile_ok &&
                            (x_profile_plane <= (xmin + 0.5*h) || x_profile_plane >= (xmax - 0.5*h))) {
@@ -1164,24 +1223,24 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             }
 
             // Deflection (centroid steering) between AG exit and right boundary of computed space.
-            const double x_right_plane = endplate_enabled
-                                             ? (g_tube_x1 - g_end_w - 0.5*h)
-                                             : (xmax - 0.5*h);
-            double I_right_Apm = 0.0, ymean_right = 0.0, yr_right = 0.0, yr_right_c = 0.0, ymax_right = 0.0, ymax_right_c = 0.0;
-            bool have_right_plane = false;
-            if (x_right_plane > x_ag_plane + 2.0*h) {
-                current_and_width_at_plane(x_right_plane, I_right_Apm, ymean_right, yr_right, yr_right_c, ymax_right, ymax_right_c);
-                have_right_plane = (I_right_Apm > 0.0);
-            }
+              const double x_right_plane = endplate_enabled
+                                               ? (g_tube_x1 - g_end_w - 0.5*h)
+                                               : (xmax - 0.5*h);
+              double I_right_Apm = 0.0, ymean_right = 0.0, yr_right = 0.0, yr_right_c = 0.0, ymax_right = 0.0, ymax_right_c = 0.0;
+              bool have_right_plane = false;
+              if (x_right_plane > x_ag_plane + 2.0*h) {
+                  current_and_width_at_plane(x_right_plane, I_right_Apm, ymean_right, yr_right, yr_right_c, ymax_right, ymax_right_c);
+                  have_right_plane = (I_right_Apm > 0.0);
+              }
 
             double steer_angle_deg = std::numeric_limits<double>::quiet_NaN();
             double y_mean_pred_400mm_m = std::numeric_limits<double>::quiet_NaN();
             double y_mean_pred_500mm_m = std::numeric_limits<double>::quiet_NaN();
             double y_mean_pred_600mm_m = std::numeric_limits<double>::quiet_NaN();
             double ymean_slope = std::numeric_limits<double>::quiet_NaN();
-            bool   have_steer = false;
+              bool   have_steer = false;
 
-            if (have_right_plane && I_ag_out_Apm > 0.0) {
+              if (have_right_plane && I_ag_out_Apm > 0.0) {
                 const double dx = x_right_plane - x_ag_plane;
                 if (dx > 0.0) {
                     ymean_slope = (ymean_right - ymean_ag) / dx;
@@ -1193,7 +1252,8 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                         y_mean_pred_600mm_m = ymean_ag + ymean_slope * 0.6;
                     }
                 }
-            }
+              }
+
 
             // ---- 2.2 Collimation scan between AG exit and sample ----
 
@@ -1512,18 +1572,22 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                 mj << "  \"DIVERGENCE_ANGLE_DEG\": ";
                 if( std::isfinite(div_angle_deg) ) mj << std::setprecision(10) << div_angle_deg; else mj << "null";
                 mj << ",\n";
-                mj << "  \"sample\": {\n";
-                mj << "    \"I_Apm\": "      << std::setprecision(10) << I_sm_Apm  << ",\n";
-                mj << "    \"I_A\": "        << std::setprecision(10) << I_sm_A    << ",\n";
-                mj << "    \"y_rms_m\": "    << std::setprecision(10) << yr_sm     << ",\n";
-                mj << "    \"y_absmax_m\": " << std::setprecision(10) << ymax_sm   << "\n";
-                mj << "  },\n";
-                mj << "  \"currents\": {\n";
-                mj << "    \"I_pg_in_Apm\": "   << std::setprecision(10) << I_pg_in_Apm  << ",\n";
-                mj << "    \"I_ag_out_Apm\": "  << std::setprecision(10) << I_ag_out_Apm << ",\n";
-                mj << "    \"I_pg_in_A\": "     << std::setprecision(10) << I_pg_in_A    << ",\n";
-                mj << "    \"I_ag_out_A\": "    << std::setprecision(10) << I_ag_out_A   << "\n";
-                mj << "  },\n";
+                  mj << "  \"sample\": {\n";
+                  mj << "    \"I_Apm\": "      << std::setprecision(10) << I_sm_Apm  << ",\n";
+                  mj << "    \"I_A\": "        << std::setprecision(10) << I_sm_A    << ",\n";
+                  mj << "    \"y_rms_m\": "    << std::setprecision(10) << yr_sm     << ",\n";
+                  mj << "    \"y_absmax_m\": " << std::setprecision(10) << ymax_sm   << "\n";
+                  mj << "  },\n";
+                  mj << "  \"currents\": {\n";
+                  mj << "    \"I_pg_in_Apm\": "   << std::setprecision(10) << I_pg_in_Apm  << ",\n";
+                  mj << "    \"I_ag_out_Apm\": "  << std::setprecision(10) << I_ag_out_Apm << ",\n";
+                  mj << "    \"I_pg_in_A\": "     << std::setprecision(10) << I_pg_in_A    << ",\n";
+                  mj << "    \"I_ag_out_A\": "    << std::setprecision(10) << I_ag_out_A   << ",\n";
+                  mj << "    \"grid_loss_Apm\": " << std::setprecision(10) << grid_loss_Apm << ",\n";
+                  mj << "    \"grid_loss_A\": "   << std::setprecision(10) << grid_loss_A   << ",\n";
+                  mj << "    \"grid_loss_frac\": " << std::setprecision(10) << grid_loss_frac << ",\n";
+                  mj << "    \"grid_transmission_frac\": " << std::setprecision(10) << grid_transmission_frac << "\n";
+                  mj << "  },\n";
                 mj << "  \"collimation\": {\n";
                 mj << "    \"y_rms_max_m\": "      << std::setprecision(10) << y_rms_max    << ",\n";
                 mj << "    \"y_rms_c_max_m\": "    << std::setprecision(10) << y_rms_c_max  << ",\n";
@@ -1534,26 +1598,39 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                 mj << "    \"has_sample_beam\": "   << (has_sample_beam  ? "true" : "false") << "\n";
                 mj << "  }\n";
                 mj << ",\n";
-                mj << "  \"deflection\": {\n";
-                mj << "    \"x_ag_plane_m\": " << std::setprecision(10) << x_ag_plane << ",\n";
-                mj << "    \"x_right_plane_m\": " << std::setprecision(10) << x_right_plane << ",\n";
-                mj << "    \"y_mean_ag_m\": " << std::setprecision(10) << ymean_ag << ",\n";
-                mj << "    \"y_mean_right_m\": " << std::setprecision(10) << ymean_right << ",\n";
-                mj << "    \"y_rms_c_ag_m\": " << std::setprecision(10) << yr_ag_c << ",\n";
-                mj << "    \"y_rms_c_right_m\": " << std::setprecision(10) << yr_right_c << ",\n";
-                mj << "    \"steer_angle_deg\": ";
-                if (std::isfinite(steer_angle_deg)) mj << std::setprecision(10) << steer_angle_deg; else mj << "null";
-                mj << ",\n";
-                mj << "    \"y_mean_pred_400mm_m\": ";
+                  mj << "  \"deflection\": {\n";
+                  mj << "    \"x_ag_plane_m\": " << std::setprecision(10) << x_ag_plane << ",\n";
+                  mj << "    \"x_right_plane_m\": " << std::setprecision(10) << x_right_plane << ",\n";
+                  mj << "    \"y_mean_ag_m\": " << std::setprecision(10) << ymean_ag << ",\n";
+                  mj << "    \"y_mean_right_m\": " << std::setprecision(10) << ymean_right << ",\n";
+                  mj << "    \"y_rms_c_ag_m\": " << std::setprecision(10) << yr_ag_c << ",\n";
+                  mj << "    \"y_rms_c_right_m\": " << std::setprecision(10) << yr_right_c << ",\n";
+                  mj << "    \"steer_angle_deg\": ";
+                  if (std::isfinite(steer_angle_deg)) mj << std::setprecision(10) << steer_angle_deg; else mj << "null";
+                  mj << ",\n";
+                  mj << "    \"y_mean_pred_400mm_m\": ";
                 if (std::isfinite(y_mean_pred_400mm_m)) mj << std::setprecision(10) << y_mean_pred_400mm_m; else mj << "null";
                 mj << ",\n";
                 mj << "    \"y_mean_pred_500mm_m\": ";
                 if (std::isfinite(y_mean_pred_500mm_m)) mj << std::setprecision(10) << y_mean_pred_500mm_m; else mj << "null";
                 mj << ",\n";
                 mj << "    \"y_mean_pred_600mm_m\": ";
-                if (std::isfinite(y_mean_pred_600mm_m)) mj << std::setprecision(10) << y_mean_pred_600mm_m; else mj << "null";
-                mj << "\n";
-                mj << "  }\n";
+                  if (std::isfinite(y_mean_pred_600mm_m)) mj << std::setprecision(10) << y_mean_pred_600mm_m; else mj << "null";
+                  mj << "\n";
+                  mj << "  }\n";
+                  mj << ",\n";
+                  mj << "  \"planes\": [\n";
+                  for (size_t pi = 0; pi < planes.size(); ++pi) {
+                      const auto &p = planes[pi];
+                      mj << "    {\"x_m\": " << std::setprecision(10) << p.x_m
+                         << ", \"y_mean_m\": " << std::setprecision(10) << p.y_mean_m
+                         << ", \"y_rms_c_m\": " << std::setprecision(10) << p.y_rms_c_m
+                         << ", \"y_absmax_m\": " << std::setprecision(10) << p.y_absmax_m
+                         << ", \"I_A\": " << std::setprecision(10) << (p.I_Apm * Leff) << "}";
+                      if (pi + 1 < planes.size()) mj << ",";
+                      mj << "\n";
+                  }
+                  mj << "  ],\n";
                 // Perveance numbers (geometric from simulated current, plus CL reference and normalized perveance)
 //
 // IMPORTANT NOTE (truncated drift):
@@ -1599,7 +1676,6 @@ const double P_sys_norm_sm_true = (P_CL_sys_A_per_V32 > 0.0) ? (P_sys_geom_sm_tr
 const double P_sys_norm_sm = P_sys_norm_ag;
 
 
-                mj << ",\n";
                 mj << "  \"perveance\": {\n";
                 mj << "    \"V_accel_V\": " << std::setprecision(10) << V_accel_V << ",\n";
                 mj << "    \"V32\": "       << std::setprecision(10) << V32       << ",\n";
@@ -1915,4 +1991,3 @@ catch (Error &e) {
     e.print_error_message(std::cerr, true);
     return 1;
 }
-
