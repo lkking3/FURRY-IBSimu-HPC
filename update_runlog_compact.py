@@ -85,6 +85,9 @@ OUTPUT_COLS = [
     "I_PG_IN_A",
     "I_AG_OUT_A",
     "I_SAMPLE_A",
+    "GRID_LOSS_A",
+    "GRID_LOSS_FRAC",
+    "GRID_TRANSMISSION_FRAC",
     "Y_RMS_MAX_M",
     "Y_ABSMAX_MAX_M",
     "TUBE_INNER_HALF_M",
@@ -106,6 +109,14 @@ OUTPUT_COLS = [
     "Y_RMS_C_AG_M",
     "Y_RMS_C_RIGHT_M",
     "Y_RMS_C_MAX_M",
+    "SAMPLE_PROFILE_PEAK_TO_AVG",
+    "SAMPLE_PROFILE_RMS_NONUNIF",
+    "SAMPLE_PROFILE_EDGE_PEAKING",
+    "SAMPLE_PROFILE_LEAKAGE_FRAC",
+    "SAMPLE_PROFILE_LEAKAGE_A",
+    "SAMPLE_PROFILE_TOTAL_IN_A",
+    "SAMPLE_PROFILE_TOTAL_OUT_A",
+    "SAMPLE_PROFILE_TOTAL_ALL_A",
     "P_CL_A_PER_V32",
     "P_GEOM_AG_A_PER_V32",
     "P_NORM_AG_OVER_CL",
@@ -179,6 +190,9 @@ def extract_row(run_dir: Path, results_dir: Path) -> Dict[str, Any]:
     row["I_PG_IN_A"]  = cur.get("I_pg_in_A")
     row["I_AG_OUT_A"] = cur.get("I_ag_out_A")
     row["I_SAMPLE_A"] = sm.get("I_A")
+    row["GRID_LOSS_A"] = cur.get("grid_loss_A")
+    row["GRID_LOSS_FRAC"] = cur.get("grid_loss_frac")
+    row["GRID_TRANSMISSION_FRAC"] = cur.get("grid_transmission_frac")
 
     row["Y_RMS_MAX_M"]       = coll.get("y_rms_max_m")
     row["Y_ABSMAX_MAX_M"]    = coll.get("y_absmax_max_m")
@@ -186,6 +200,17 @@ def extract_row(run_dir: Path, results_dir: Path) -> Dict[str, Any]:
     row["Y_RMS_SAMPLE_M"]    = sm.get("y_rms_m")
     row["Y_ABSMAX_SAMPLE_M"] = sm.get("y_absmax_m")
     row["Y_RMS_C_MAX_M"]     = coll.get("y_rms_c_max_m")
+
+    prof = _load_json(run_dir / "sample_diameter_profile.json") or {}
+    stats = prof.get("stats") or {}
+    row["SAMPLE_PROFILE_PEAK_TO_AVG"] = stats.get("peak_to_avg")
+    row["SAMPLE_PROFILE_RMS_NONUNIF"] = stats.get("rms_nonuniform")
+    row["SAMPLE_PROFILE_EDGE_PEAKING"] = stats.get("edge_peaking_index")
+    row["SAMPLE_PROFILE_LEAKAGE_FRAC"] = stats.get("leakage_frac")
+    row["SAMPLE_PROFILE_LEAKAGE_A"] = stats.get("leakage_I_A")
+    row["SAMPLE_PROFILE_TOTAL_IN_A"] = prof.get("total_I_A_in")
+    row["SAMPLE_PROFILE_TOTAL_OUT_A"] = prof.get("total_I_A_out")
+    row["SAMPLE_PROFILE_TOTAL_ALL_A"] = prof.get("total_I_A")
 
     # optional predicted footprint fields (filled only if your run writes them)
     for out_key, paths in [
@@ -262,6 +287,7 @@ def scan_run_dirs(results_dir: Path) -> List[Path]:
     runs.sort(key=lambda x: str(x))
     return runs
 
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results-dir", default="results")
@@ -314,6 +340,7 @@ def main():
 
     write_csv(csv_path, out_rows)
     print(f"[runlog] wrote {csv_path}  rows={len(out_rows)}  cols={len(ALL_COLS)}")
+
 
 if __name__ == "__main__":
     main()
