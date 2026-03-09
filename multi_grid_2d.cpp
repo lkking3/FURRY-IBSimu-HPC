@@ -1,0 +1,2177 @@
+#include "geometry.hpp"
+#include "func_solid.hpp"
+#include "geomplotter.hpp"
+#include "epot_bicgstabsolver.hpp"
+#include "epot_efield.hpp"
+#include "meshvectorfield.hpp"
+#include "ibsimu.hpp"
+#include "error.hpp"
+#include "particledatabase.hpp"   // ParticleDataBase2D
+#include "trajectorydiagnostics.hpp"
+#include "config.h"               // for InitialPlasma
+#include "meshscalarfield.hpp"
+#include <cstdlib>
+#include <cstdio>
+#include <cmath>
+#include <cstring>
+#include <cctype>
+#include <iostream>
+#include <algorithm>
+#include <string>
+#include <fstream>
+#include <string>
+#include <ctime>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <errno.h>
+#include <iomanip>   // PATCH: for CSV precision
+#include <vector>
+#include <limits>
+#include <chrono>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+// ---------- env helpers ----------
+static double envd(const char* k, double vdef) {
+    if (const char* s = std::getenv(k)) {
+        char* e = nullptr; double v = std::strtod(s, &e);
+        if (e && *e == '\0') return v;
+    }
+    return vdef;
+}
+static int envi(const char* k, int vdef) {
+    if (const char* s = std::getenv(k)) return std::atoi(s);
+    return vdef;
+}
+static inline double deg2rad(double deg){ return deg * (M_PI/180.0); }
+static inline double rad2deg(double r){ return r * (180.0/M_PI); }
+
+// v^(3/2) helper (avoids pow for speed + stability)
+static inline double pow32(double v) { return (v > 0.0) ? (v * std::sqrt(v)) : 0.0; }
+
+// Estimate number of beamlets (apertures) for a full grid from aperture radius (m).
+// Table from user packing chart (radius_mm -> max apertures). Piecewise linear interpolation.
+static double estimate_beamlet_count(double ap_rad_m) {
+    struct Pt { double r; double n; };
+    static const Pt T[] = {
+        {1.0e-3, 2221.0}, {2.0e-3,  769.0}, {3.0e-3,  379.0}, {4.0e-3, 223.0},
+        {5.0e-3,  151.0}, {6.0e-3,  109.0}, {7.0e-3,   73.0}, {8.0e-3,  55.0}
+    };
+    const int N = (int)(sizeof(T)/sizeof(T[0]));
+    if (!(ap_rad_m > 0.0)) return T[0].n;
+    if (ap_rad_m <= T[0].r) return T[0].n;
+    if (ap_rad_m >= T[N-1].r) return T[N-1].n;
+    for (int i = 0; i < N-1; ++i) {
+        if (ap_rad_m >= T[i].r && ap_rad_m <= T[i+1].r) {
+            const double r0=T[i].r, n0=T[i].n;
+            const double r1=T[i+1].r, n1=T[i+1].n;
+            const double tt = (r1>r0) ? ((ap_rad_m - r0)/(r1 - r0)) : 0.0;
+            return n0 + tt*(n1 - n0);
+        }
+    }
+    return T[N-1].n;
+}
+
+
+// env string helper
+static std::string envs(const char* k, const char* defv = nullptr) {
+    const char* s = std::getenv(k);
+    if (s && *s) return std::string(s);
+    return defv ? std::string(defv) : std::string();
+}
+
+static bool parse_double_str(const std::string &s, double &out) {
+    char *e = nullptr;
+    out = std::strtod(s.c_str(), &e);
+    return (e && *e == '\0');
+}
+
+static void split_tokens(const std::string &s, std::vector<std::string> &out) {
+    std::string cur;
+    for (char c : s) {
+        if (c == ',' || c == ';') {
+            if (!cur.empty()) out.push_back(cur);
+            cur.clear();
+            continue;
+        }
+        if (std::isspace(static_cast<unsigned char>(c))) continue;
+        cur.push_back(c);
+    }
+    if (!cur.empty()) out.push_back(cur);
+}
+static void split_tokens(const std::string &s, std::vector<std::string> &out, char delim) {
+    std::string cur;
+    for (char c : s) {
+        if (c == delim) {
+            if (!cur.empty()) out.push_back(cur);
+            cur.clear();
+            continue;
+        }
+        if (std::isspace(static_cast<unsigned char>(c))) continue;
+        cur.push_back(c);
+    }
+    if (!cur.empty()) out.push_back(cur);
+}
+
+// mkdir -p helpers
+static int mkdir_one(const std::string &p) {
+    if (p.empty()) return 0;
+    if (::mkdir(p.c_str(), 0775) == 0) return 0;
+    if (errno == EEXIST) return 0;
+    return -1;
+}
+static int mkdir_p(const std::string &path) {
+    if (path.empty()) return 0;
+    std::string cur;
+    if (path[0] == '/') { cur = "/"; }
+    for (size_t i = (path[0]=='/'); i < path.size(); ++i) {
+        char c = path[i];
+        cur.push_back(c);
+        if (c=='/') { if (mkdir_one(cur)) return -1; }
+    }
+    return mkdir_one(cur);
+}
+
+// timestamp + basename for output files
+static std::string timestamp_now() {
+    char buf[32];
+    std::time_t t = std::time(nullptr);
+    std::tm tmv{};
+    #ifdef _WIN32
+    localtime_s(&tmv, &t);
+    #else
+    tmv = *std::localtime(&t);
+    #endif
+    std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tmv);
+    return std::string(buf);
+}
+static std::string basename_only(const std::string &p) {
+    size_t pos = p.find_last_of('/');
+    if (pos == std::string::npos) return p;
+    return p.substr(pos+1);
+}
+// add suffix before file extension, preserving directory
+static std::string add_suffix_before_ext(const std::string &path, const std::string &suffix) {
+    size_t slash = path.find_last_of('/');
+    std::string dir  = (slash == std::string::npos) ? "" : path.substr(0, slash+1);
+    std::string file = (slash == std::string::npos) ? path : path.substr(slash+1);
+    size_t dot = file.find_last_of('.');
+    std::string name = (dot == std::string::npos) ? file : file.substr(0, dot);
+    std::string ext  = (dot == std::string::npos) ? ""   : file.substr(dot);
+    return dir + name + suffix + ext;
+}
+
+
+
+// ---------- globals for FuncSolid ----------
+static constexpr int MAX_STACK_GRIDS = 4;
+static constexpr int GRID_BOUNDARY_BASE = 7;
+
+struct ChamferSpec {
+    double up_depth = 0.0;
+    double up_angle_deg = 0.0;
+    double up_slope = 0.0;
+    double dn_depth = 0.0;
+    double dn_angle_deg = 0.0;
+    double dn_slope = 0.0;
+    bool scaled = false;
+};
+
+struct GridSpec {
+    std::string name;
+    double voltage = 0.0;
+    double thickness = 0.0;
+    double gap_after = 0.0;
+    double x0 = 0.0;
+    double x1 = 0.0;
+    std::vector<double> offs;
+    std::vector<double> rads;
+    ChamferSpec chamfer;
+    bool mirror = false;
+    double mean_radius = 0.0;
+    double max_radius = 0.0;
+};
+
+static std::vector<GridSpec> g_grids;
+static double g_a_scr    = 0.0;   // first-grid aperture radius [m] (mean/default)
+static double g_a_acc    = 0.0;   // last-grid aperture radius [m] (mean/default)
+static double g_xs0      = 0.0;   // first grid start x
+static double g_xs1      = 0.0;   // first grid end x
+static double g_xa0      = 0.0;   // last grid start x
+static double g_xa1      = 0.0;   // last grid end x
+static double g_off      = 0.0;   // downstream-most aperture y-offset [m]
+static double g_scr_off  = 0.0;   // upstream-most aperture y-offset [m]
+static std::vector<double> g_acc_offs;
+static std::vector<double> g_scr_offs;
+static std::vector<double> g_acc_rads;
+static std::vector<double> g_scr_rads;
+
+// tube/holder geometry globals
+static double g_ybox = 0.0;
+static double g_tube_x0 = 0.0, g_tube_x1 = 0.0;
+static double g_tube_w  = 0.0;  // wall thickness
+static double g_end_w   = 0.0;  // sample holder thickness
+static double g_holder_x0 = 0.0, g_holder_x1 = 0.0;
+static double g_holder_hh = 0.0;  // sample holder half-height
+
+
+
+// clamp two depths to fit within thickness (proportional if sum>t)
+static inline void clamp_biface(double t, double &du, double &dd, bool &scaled) {
+    du = std::clamp(du, 0.0, t);
+    dd = std::clamp(dd, 0.0, t);
+    if (du + dd > t && (du+dd)>0.0) {
+        double f = t / (du + dd);
+        du *= f; dd *= f;
+        scaled = true;
+    }
+}
+
+static inline bool in_any_aperture(double y,
+                                   const std::vector<double> &offs,
+                                   const std::vector<double> &rads,
+                                   double delta) {
+    const size_t n = std::min(offs.size(), rads.size());
+    for (size_t i = 0; i < n; ++i) {
+        const double a_eff = rads[i] + delta;
+        if (std::fabs(y - offs[i]) < a_eff) return true;
+    }
+    return false;
+}
+
+static bool parse_bool_token(const std::string &s, bool &out) {
+    if (s == "1" || s == "true" || s == "TRUE" || s == "yes" || s == "YES") {
+        out = true;
+        return true;
+    }
+    if (s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO") {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+static bool parse_chamfer_token(const std::string &tok, double &depth, double &angle_deg) {
+    std::vector<std::string> parts;
+    split_tokens(tok, parts, ':');
+    if (parts.size() != 2) return false;
+    return parse_double_str(parts[0], depth) && parse_double_str(parts[1], angle_deg);
+}
+
+static bool parse_apertures_token(const std::string &tok,
+                                  double default_radius,
+                                  bool mirror,
+                                  std::vector<double> &offs,
+                                  std::vector<double> &rads) {
+    std::vector<std::string> items;
+    split_tokens(tok, items);
+    for (const auto &item : items) {
+        std::vector<std::string> parts;
+        split_tokens(item, parts, ':');
+        if (parts.empty() || parts.size() > 2) return false;
+        double off = 0.0;
+        if (!parse_double_str(parts[0], off)) return false;
+        double rad = default_radius;
+        if (parts.size() == 2) {
+            if (!parse_double_str(parts[1], rad)) return false;
+        }
+        if (!(rad > 0.0)) return false;
+        offs.push_back(off);
+        rads.push_back(rad);
+        if (mirror && std::fabs(off) > 1.0e-12) {
+            offs.push_back(-off);
+            rads.push_back(rad);
+        }
+    }
+    return !offs.empty() && offs.size() == rads.size();
+}
+
+static inline double grid_delta(const GridSpec &grid, double x) {
+    double ae = 0.0;
+    if (grid.chamfer.up_depth > 0.0 && grid.chamfer.up_slope > 0.0) {
+        const double xu_end = grid.x0 + grid.chamfer.up_depth;
+        if (x >= grid.x0 && x <= xu_end) ae += (xu_end - x) * grid.chamfer.up_slope;
+    }
+    if (grid.chamfer.dn_depth > 0.0 && grid.chamfer.dn_slope > 0.0) {
+        const double xd_sta = grid.x1 - grid.chamfer.dn_depth;
+        if (x >= xd_sta && x <= grid.x1) ae += (x - xd_sta) * grid.chamfer.dn_slope;
+    }
+    return ae;
+}
+
+static inline bool grid_fn_idx(size_t idx, double x, double y) {
+    if (idx >= g_grids.size()) return false;
+    const GridSpec &grid = g_grids[idx];
+    if (x >= grid.x0 && x <= grid.x1) {
+        return !in_any_aperture(y, grid.offs, grid.rads, grid_delta(grid, x));
+    }
+    return false;
+}
+
+static bool grid0_fn(double x, double y, double /*z*/) { return grid_fn_idx(0, x, y); }
+static bool grid1_fn(double x, double y, double /*z*/) { return grid_fn_idx(1, x, y); }
+static bool grid2_fn(double x, double y, double /*z*/) { return grid_fn_idx(2, x, y); }
+static bool grid3_fn(double x, double y, double /*z*/) { return grid_fn_idx(3, x, y); }
+
+// --------- solids: downstream tube walls (top & bottom) ----------
+static bool tube_top_fn(double x, double y, double /*z*/) {
+    return (x >= g_tube_x0 && x <= g_tube_x1 && y >= (g_ybox - g_tube_w));
+}
+static bool tube_bot_fn(double x, double y, double /*z*/) {
+    return (x >= g_tube_x0 && x <= g_tube_x1 && y <= (-g_ybox + g_tube_w));
+}
+
+static bool holder_fn(double x, double y, double /*z*/) {
+    return (x >= g_holder_x0 && x <= g_holder_x1 && std::fabs(y) <= g_holder_hh);
+}
+
+int main() try {
+
+// ---- timing ----
+using SteadyClock = std::chrono::steady_clock;
+const auto t_start = SteadyClock::now();
+auto t_after_mesh  = t_start;
+auto t_after_solve = t_start;
+auto t_after_diag  = t_start;
+auto t_after_png   = t_start;
+auto t_end         = t_start;
+
+auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_point &b) -> double {
+    return std::chrono::duration<double>(b - a).count();
+};
+
+    // ----- base geometry (env overrides) -----
+    const double h        = envd("H", 1.0e-4);
+    const double a_scr_legacy = envd("SCREEN_AP_RAD_M", envd("AP_RAD_M", 1.0e-3));
+    const double a_acc_legacy = envd("ACCEL_AP_RAD_M",  a_scr_legacy);
+    const double t_legacy      = envd("GRID_T_M", 5.0e-4);
+    const double gap_legacy    = envd("GAP_M", 3.0e-3);
+    const double x_left   = envd("X_LEFT_M", 2.0e-3);
+    const double x_right  = envd("X_RIGHT_M", 8.0e-3);
+    const double x_right_phys = envd("X_RIGHT_PHYS_M", x_right);
+    const bool truncated_drift = (x_right + 1.0e-12 < x_right_phys);
+    const double default_ap_rad = envd("DEFAULT_AP_RAD_M", envd("AP_RAD_M", 1.0e-3));
+    const std::string grid_stack_raw = envs("GRID_STACK", "");
+    const bool using_grid_stack = !grid_stack_raw.empty();
+
+    const std::string pairs_raw = envs("APERTURE_PAIRS_M", "");
+    const int mirror_pairs = envi("APERTURE_MIRROR", 0);
+
+    std::vector<GridSpec> grid_specs;
+
+    if (using_grid_stack) {
+        std::vector<std::string> grid_tokens;
+        split_tokens(grid_stack_raw, grid_tokens, ';');
+        if (grid_tokens.size() < 2 || grid_tokens.size() > MAX_STACK_GRIDS) {
+            std::fprintf(stderr, "ERROR: GRID_STACK must define between 2 and %d grids\n", MAX_STACK_GRIDS);
+            return 2;
+        }
+        for (size_t gi = 0; gi < grid_tokens.size(); ++gi) {
+            std::vector<std::string> fields;
+            split_tokens(grid_tokens[gi], fields, '|');
+            if (fields.size() < 5 || fields.size() > 8) {
+                std::fprintf(stderr, "ERROR: GRID_STACK entry %zu must have 5-8 fields\n", gi);
+                return 2;
+            }
+
+            GridSpec grid;
+            grid.name = fields[0].empty() ? (std::string("grid") + std::to_string(gi)) : fields[0];
+            if (!parse_double_str(fields[1], grid.voltage) ||
+                !parse_double_str(fields[2], grid.thickness) ||
+                !parse_double_str(fields[3], grid.gap_after)) {
+                std::fprintf(stderr, "ERROR: GRID_STACK entry %zu has invalid voltage/thickness/gap\n", gi);
+                return 2;
+            }
+            if (!(grid.thickness > 0.0) || grid.gap_after < 0.0) {
+                std::fprintf(stderr, "ERROR: GRID_STACK entry %zu has non-positive thickness or negative gap\n", gi);
+                return 2;
+            }
+            if (fields.size() >= 6 && !parse_chamfer_token(fields[5], grid.chamfer.up_depth, grid.chamfer.up_angle_deg)) {
+                std::fprintf(stderr, "ERROR: GRID_STACK entry %zu has invalid upstream chamfer\n", gi);
+                return 2;
+            }
+            if (fields.size() >= 7 && !parse_chamfer_token(fields[6], grid.chamfer.dn_depth, grid.chamfer.dn_angle_deg)) {
+                std::fprintf(stderr, "ERROR: GRID_STACK entry %zu has invalid downstream chamfer\n", gi);
+                return 2;
+            }
+            if (fields.size() >= 8 && !parse_bool_token(fields[7], grid.mirror)) {
+                std::fprintf(stderr, "ERROR: GRID_STACK entry %zu has invalid mirror flag\n", gi);
+                return 2;
+            }
+            if (!parse_apertures_token(fields[4], default_ap_rad, grid.mirror, grid.offs, grid.rads)) {
+                std::fprintf(stderr, "ERROR: GRID_STACK entry %zu has invalid aperture list\n", gi);
+                return 2;
+            }
+
+            clamp_biface(grid.thickness, grid.chamfer.up_depth, grid.chamfer.dn_depth, grid.chamfer.scaled);
+            grid.chamfer.up_slope = std::tan(deg2rad(std::max(grid.chamfer.up_angle_deg, 0.0)));
+            grid.chamfer.dn_slope = std::tan(deg2rad(std::max(grid.chamfer.dn_angle_deg, 0.0)));
+            double rsum = 0.0;
+            for (double r : grid.rads) {
+                rsum += r;
+                grid.max_radius = std::max(grid.max_radius, r);
+            }
+            grid.mean_radius = grid.rads.empty() ? default_ap_rad : (rsum / grid.rads.size());
+            grid_specs.push_back(grid);
+        }
+    } else {
+        const double off_y    = envd("ACCEL_OFF_Y_M", 0.0);
+        const double scr_off_y = envd("SCREEN_OFF_Y_M", envd("PG_OFF_Y_M", 0.0));
+
+        struct AperturePair {
+            double scr_off;
+            double acc_off;
+            double scr_rad;
+            double acc_rad;
+        };
+        std::vector<AperturePair> ap_pairs;
+        auto add_pair = [&](double s, double a, double rs, double ra) {
+            const double eps = 1.0e-12;
+            for (const auto &p : ap_pairs) {
+                if (std::fabs(p.scr_off - s) <= eps &&
+                    std::fabs(p.acc_off - a) <= eps &&
+                    std::fabs(p.scr_rad - rs) <= eps &&
+                    std::fabs(p.acc_rad - ra) <= eps) {
+                    return;
+                }
+            }
+            ap_pairs.push_back({s, a, rs, ra});
+        };
+
+        if (!pairs_raw.empty()) {
+            std::vector<std::string> toks;
+            split_tokens(pairs_raw, toks);
+            for (const auto &tok : toks) {
+                std::vector<std::string> parts;
+                split_tokens(tok, parts, ':');
+                if (parts.size() < 2 || parts.size() > 3) continue;
+                double s = 0.0, a = 0.0, r = 0.0;
+                if (!parse_double_str(parts[0], s) || !parse_double_str(parts[1], a)) continue;
+                const bool have_r = (parts.size() == 3) && parse_double_str(parts[2], r) && (r > 0.0);
+                add_pair(s, a, have_r ? r : a_scr_legacy, have_r ? r : a_acc_legacy);
+            }
+        }
+
+        if (ap_pairs.empty()) add_pair(scr_off_y, off_y, a_scr_legacy, a_acc_legacy);
+
+        if (mirror_pairs && !pairs_raw.empty()) {
+            const double eps = 1.0e-12;
+            const size_t n0 = ap_pairs.size();
+            for (size_t i = 0; i < n0; ++i) {
+                const double s = ap_pairs[i].scr_off;
+                const double a = ap_pairs[i].acc_off;
+                if (std::fabs(s) <= eps && std::fabs(a) <= eps) continue;
+                add_pair(-s, -a, ap_pairs[i].scr_rad, ap_pairs[i].acc_rad);
+            }
+        }
+
+        GridSpec screen;
+        screen.name = "screen";
+        screen.voltage = envd("VS_V", 0.0);
+        screen.thickness = t_legacy;
+        screen.gap_after = gap_legacy;
+        for (const auto &p : ap_pairs) {
+            screen.offs.push_back(p.scr_off);
+            screen.rads.push_back(p.scr_rad);
+        }
+        screen.chamfer.up_depth = envd("SCR_UP_DEPTH_M", 0.0);
+        screen.chamfer.up_angle_deg = envd("SCR_UP_ANGLE_DEG", 0.0);
+        screen.chamfer.dn_depth = envd("SCR_DN_DEPTH_M", 0.0);
+        screen.chamfer.dn_angle_deg = envd("SCR_DN_ANGLE_DEG", 0.0);
+        clamp_biface(screen.thickness, screen.chamfer.up_depth, screen.chamfer.dn_depth, screen.chamfer.scaled);
+        screen.chamfer.up_slope = std::tan(deg2rad(std::max(screen.chamfer.up_angle_deg, 0.0)));
+        screen.chamfer.dn_slope = std::tan(deg2rad(std::max(screen.chamfer.dn_angle_deg, 0.0)));
+
+        GridSpec accel;
+        accel.name = "accel";
+        accel.voltage = envd("VA_V", -1.0e4);
+        accel.thickness = t_legacy;
+        accel.gap_after = 0.0;
+        for (const auto &p : ap_pairs) {
+            accel.offs.push_back(p.acc_off);
+            accel.rads.push_back(p.acc_rad);
+        }
+        accel.chamfer.up_depth = envd("ACC_UP_DEPTH_M", 0.0);
+        accel.chamfer.up_angle_deg = envd("ACC_UP_ANGLE_DEG", 0.0);
+        accel.chamfer.dn_depth = envd("ACC_DN_DEPTH_M", 0.0);
+        accel.chamfer.dn_angle_deg = envd("ACC_DN_ANGLE_DEG", 0.0);
+        clamp_biface(accel.thickness, accel.chamfer.up_depth, accel.chamfer.dn_depth, accel.chamfer.scaled);
+        accel.chamfer.up_slope = std::tan(deg2rad(std::max(accel.chamfer.up_angle_deg, 0.0)));
+        accel.chamfer.dn_slope = std::tan(deg2rad(std::max(accel.chamfer.dn_angle_deg, 0.0)));
+
+        auto finalize_legacy_grid = [](GridSpec &grid, double fallback_rad) {
+            double rsum = 0.0;
+            for (double r : grid.rads) {
+                rsum += r;
+                grid.max_radius = std::max(grid.max_radius, r);
+            }
+            grid.mean_radius = grid.rads.empty() ? fallback_rad : (rsum / grid.rads.size());
+        };
+        finalize_legacy_grid(screen, a_scr_legacy);
+        finalize_legacy_grid(accel, a_acc_legacy);
+        grid_specs.push_back(screen);
+        grid_specs.push_back(accel);
+    }
+
+    if (grid_specs.size() < 2 || grid_specs.size() > MAX_STACK_GRIDS) {
+        std::fprintf(stderr, "ERROR: expected between 2 and %d grids, got %zu\n", MAX_STACK_GRIDS, grid_specs.size());
+        return 2;
+    }
+
+    double x_cursor = 0.0;
+    for (auto &grid : grid_specs) {
+        grid.x0 = x_cursor;
+        grid.x1 = grid.x0 + grid.thickness;
+        x_cursor = grid.x1 + grid.gap_after;
+    }
+    g_grids = grid_specs;
+
+    const GridSpec &first_grid = g_grids.front();
+    const GridSpec &last_grid  = g_grids.back();
+    const double xs0 = first_grid.x0;
+    const double xs1 = first_grid.x1;
+    const double xa0 = last_grid.x0;
+    const double xa1 = last_grid.x1;
+
+    const double a_scr = first_grid.mean_radius;
+    const double a_acc = last_grid.mean_radius;
+    const double t = first_grid.thickness;
+    const double gap = (g_grids.size() >= 2) ? g_grids.front().gap_after : 0.0;
+    const double scr_du = first_grid.chamfer.up_depth;
+    const double scr_ua = first_grid.chamfer.up_angle_deg;
+    const double scr_dd = first_grid.chamfer.dn_depth;
+    const double scr_da = first_grid.chamfer.dn_angle_deg;
+    const double acc_du = last_grid.chamfer.up_depth;
+    const double acc_ua = last_grid.chamfer.up_angle_deg;
+    const double acc_dd = last_grid.chamfer.dn_depth;
+    const double acc_da = last_grid.chamfer.dn_angle_deg;
+    const bool scr_scaled = first_grid.chamfer.scaled;
+    const bool acc_scaled = last_grid.chamfer.scaled;
+
+    g_a_scr = a_scr;
+    g_a_acc = a_acc;
+    g_xs0 = xs0; g_xs1 = xs1;
+    g_xa0 = xa0; g_xa1 = xa1;
+    g_scr_offs = first_grid.offs;
+    g_scr_rads = first_grid.rads;
+    g_acc_offs = last_grid.offs;
+    g_acc_rads = last_grid.rads;
+    g_scr_off = g_scr_offs.empty() ? 0.0 : g_scr_offs.front();
+    g_off = g_acc_offs.empty() ? 0.0 : g_acc_offs.front();
+
+    int N_APERTURES = (int)g_scr_offs.size();
+    double a_max = 0.0;
+    double max_delta = 0.0;
+    double off_abs = 0.0;
+    for (const auto &grid : g_grids) {
+        a_max = std::max(a_max, grid.max_radius);
+        max_delta = std::max(max_delta, std::max(grid.chamfer.up_depth * grid.chamfer.up_slope,
+                                                 grid.chamfer.dn_depth * grid.chamfer.dn_slope));
+        for (double off : grid.offs) off_abs = std::max(off_abs, std::fabs(off));
+    }
+    const double ybox_def = std::max(3.0 * (a_max + max_delta) + off_abs, 5.0e-3);
+    g_ybox = envd("YBOX_M", ybox_def);
+
+    // ----- electrical potentials -----
+    const double VS_V = first_grid.voltage;
+    const double VA_V = last_grid.voltage;
+
+    // Toggle ion / plasma physics
+    const int ENABLE_IONS        = envi("ENABLE_IONS", 0);   // 0 = old behavior
+    const int ION_ITER_MAX       = envi("ION_ITER_MAX", 8);  // Vlasov/plasma iterations
+
+    // Ion species (you can tune later)
+    const double ION_Q_E         = envd("ION_Q_E",   1.0);        // charge in units of e
+    const double ION_M_AMU       = envd("ION_M_AMU", 2.0);       // mass in atomic mass units (Ar+ default)
+    const int    ION_NPART       = envi("ION_NPART", 2000);       // trajectories
+
+    // Optional: transverse temperature of ions
+    const double ION_TP_EV       = envd("ION_TP_EV", 0.0);        // parallel temp [eV]
+    const double ION_TT_EV       = envd("ION_TT_EV", 0.2);        // transverse temp [eV]
+
+    // ----- Perveance bookkeeping (Child-Langmuir reference + later geometric perveance) -----
+    const double V_accel_V = std::fabs(VS_V - VA_V);
+    const double V32 = pow32(V_accel_V);
+    const double d_eff_m = envd("PERV_D_EFF_M", gap);
+    const double eps0 = 8.8541878128e-12;
+    const double qe   = 1.602176634e-19;
+    const double amu  = 1.66053906660e-27;
+    const double q_C  = std::fabs(ION_Q_E) * qe;
+    const double m_kg = std::fabs(ION_M_AMU) * amu;
+    const double A_ap_m2 = M_PI * a_scr * a_scr;
+
+    double P_CL_A_per_V32 = 0.0;
+    double I_CL_A = 0.0;
+    if (d_eff_m > 0.0 && m_kg > 0.0 && q_C > 0.0) {
+        P_CL_A_per_V32 = (4.0/9.0) * eps0 * std::sqrt(2.0*q_C/m_kg) * A_ap_m2 / (d_eff_m*d_eff_m);
+        I_CL_A = P_CL_A_per_V32 * V32;
+    }
+
+    const double N_beamlets_sim = (N_APERTURES > 0) ? (double)N_APERTURES : 1.0;
+    const double P_CL_sys_A_per_V32 = P_CL_A_per_V32 * N_beamlets_sim;
+    const double I_CL_sys_A = I_CL_A * N_beamlets_sim;
+
+    // Record key plasma/beam tuning knobs in meta.json even when ions are disabled (for provenance).
+    const double PLASMA_NI_M3_META = envd("PLASMA_NI_M3", 5.0e18);
+    const double PLASMA_TE_EV_META = envd("PLASMA_TE_EV", 3.7);
+    const double PLASMA_UP_V_META  = envd("PLASMA_UP_V", VS_V);
+    const double ION_J_SCALE_META     = envd("ION_J_SCALE", 1.0);
+    const double SC_FACTOR_META       = envd("SC_FACTOR", 1.0);
+    const double SC_RAMP_START_M_META = envd("SC_RAMP_START_M", xa1 + 0.5*h);
+    const double SC_RAMP_LEN_M_META   = envd("SC_RAMP_LEN_M", 0.0);
+
+    // Domain extents
+    const double xmin = -x_left;
+    const double xmax = xa1 + x_right;
+    const double xmax_phys = xa1 + x_right_phys;
+
+    // Downstream tube region spans from last grid end to domain end
+    g_tube_x0 = envd("TUBE_X_START_M", xa1);
+    g_tube_x1 = envd("TUBE_X_END_M",   xmax);
+    g_tube_w  = std::max(envd("TUBE_WALL_T_M", 2.0*h), h);
+    g_end_w   = 0.0;
+    const bool endplate_enabled = !truncated_drift;
+
+    const double holder_h = envd("SAMPLE_HOLDER_H_M", 6.6e-2);
+    const double holder_w = envd("SAMPLE_HOLDER_T_M", 1.0e-3);
+    const double holder_v = envd("SAMPLE_HOLDER_V", VA_V);
+    const int holder_enable = envi("SAMPLE_HOLDER_ENABLE", endplate_enabled ? 1 : 0);
+    const bool holder_enabled = endplate_enabled && (holder_enable != 0) &&
+                                (holder_h > 0.0) && (holder_w > 0.0);
+    if (holder_enabled) {
+        g_end_w = holder_w;
+        g_holder_x1 = g_tube_x1;
+        g_holder_x0 = g_tube_x1 - holder_w;
+        g_holder_hh = 0.5 * holder_h;
+    }
+
+    // results directory naming (sweep-friendly)
+    const std::string results_base = envs("RESULTS_DIR", "results");
+    std::string stamp = envs("RUN_STAMP"); if (stamp.empty()) stamp = timestamp_now();
+    const std::string prefix = envs("RUN_PREFIX", "run");
+    const std::string tag    = envs("RUN_TAG", "");
+    const std::string jobid  = envs("SLURM_JOB_ID", "");
+    std::string runname = prefix + "_" + stamp;
+    if (!tag.empty())   runname += "_" + tag;
+    if (!jobid.empty()) runname += "_j" + jobid;
+    const std::string outdir = results_base + "/" + runname;
+
+    if (mkdir_p(results_base) || mkdir_p(outdir)) {
+        std::fprintf(stderr, "ERROR: could not create results dir: %s\n", outdir.c_str());
+        return 2;
+    }
+
+    // keep original PNG_NAME but write into results folder
+    const char* pngname_c = std::getenv("PNG_NAME") ? std::getenv("PNG_NAME") : "multi_grid_geom.png";
+    const std::string png = outdir + "/" + basename_only(pngname_c);
+    
+
+
+    // Mesh size
+    Int3D size( int(std::floor((xmax - xmin)/h)+1),
+                int(std::floor((2.0*g_ybox)/h)+1),
+                1 );
+
+    Geometry geom( MODE_2D, size, Vec3D(xmin, -g_ybox, 0.0), h );
+
+    const int tube_top_boundary = GRID_BOUNDARY_BASE + (int)g_grids.size();
+    const int tube_bot_boundary = tube_top_boundary + 1;
+    const int holder_boundary   = tube_top_boundary + 2;
+
+    // Define solids
+    for (size_t gi = 0; gi < g_grids.size(); ++gi) {
+        const int bid = GRID_BOUNDARY_BASE + (int)gi;
+        switch (gi) {
+            case 0: geom.set_solid(bid, new FuncSolid(&grid0_fn)); break;
+            case 1: geom.set_solid(bid, new FuncSolid(&grid1_fn)); break;
+            case 2: geom.set_solid(bid, new FuncSolid(&grid2_fn)); break;
+            case 3: geom.set_solid(bid, new FuncSolid(&grid3_fn)); break;
+            default: break;
+        }
+    }
+    geom.set_solid(tube_top_boundary, new FuncSolid(&tube_top_fn));
+    geom.set_solid(tube_bot_boundary, new FuncSolid(&tube_bot_fn));
+    if (holder_enabled) {
+        geom.set_solid(holder_boundary, new FuncSolid(&holder_fn));
+    }
+
+    // --- Boundary conditions ---
+    // Global box:
+    geom.set_boundary(1, Bound(BOUND_DIRICHLET, VS_V)); // xmin (plasma chamber potential)
+    if (holder_enabled) {
+        // Full-length run with sample holder: open boundary (no normal E-field).
+        geom.set_boundary(2, Bound(BOUND_NEUMANN, 0.0)); // xmax
+    } else if (endplate_enabled) {
+        // Full-length run without holder: pin far boundary to tube potential.
+        geom.set_boundary(2, Bound(BOUND_DIRICHLET, VA_V)); // xmax
+    } else {
+        // Truncated drift: open boundary (no normal E-field).
+        geom.set_boundary(2, Bound(BOUND_NEUMANN, 0.0)); // xmax
+    }
+    geom.set_boundary(3, Bound(BOUND_DIRICHLET, VA_V));
+    geom.set_boundary(4, Bound(BOUND_DIRICHLET, VA_V));
+
+    // Conductors:
+    for (size_t gi = 0; gi < g_grids.size(); ++gi) {
+        const int bid = GRID_BOUNDARY_BASE + (int)gi;
+        geom.set_boundary(bid, Bound(BOUND_DIRICHLET, g_grids[gi].voltage));
+    }
+    geom.set_boundary(tube_top_boundary, Bound(BOUND_DIRICHLET, VA_V));
+    geom.set_boundary(tube_bot_boundary, Bound(BOUND_DIRICHLET, VA_V));
+    if (holder_enabled) {
+        geom.set_boundary(holder_boundary, Bound(BOUND_DIRICHLET, holder_v));
+    }
+
+    geom.build_mesh();
+    t_after_mesh = SteadyClock::now();
+
+
+    // meta.json for sweep bookkeeping
+    {
+        std::ofstream m(outdir + "/meta.json");
+        m << "{\n";
+        m << "  \"RUN_STAMP\":\"" << stamp << "\",\n";
+        m << "  \"RUN_TAG\":\"" << envs("RUN_TAG","") << "\",\n";
+        m << "  \"runname\":\"" << runname << "\",\n";
+        m << "  \"solver\":\"multi_grid_2d\",\n";
+        m << "  \"grid_stack_mode\":" << (using_grid_stack ? "true" : "false") << ",\n";
+        m << "  \"GRID_STACK\":\"" << grid_stack_raw << "\",\n";
+        m << "  \"APERTURE_PAIRS_M\":\"" << pairs_raw << "\",\n";
+        m << "  \"APERTURE_MIRROR\":" << (mirror_pairs ? "true" : "false") << ",\n";
+
+        m << "  \"H\":" << h << ",\n";
+        m << "  \"AP_RAD_M\":" << a_scr << ",\n";
+        m << "  \"SCREEN_AP_RAD_M\":" << a_scr << ",\n";
+        m << "  \"ACCEL_AP_RAD_M\":" << a_acc << ",\n";
+        m << "  \"GRID_T_M\":" << t << ",\n";
+        m << "  \"GAP_M\":" << gap << ",\n";
+        m << "  \"ACCEL_OFF_Y_M\":" << g_off << ",\n";
+        m << "  \"SCREEN_OFF_Y_M\":" << g_scr_off << ",\n";
+        m << "  \"N_APERTURES\":" << N_APERTURES << ",\n";
+
+        auto write_list = [&](const char *key, const std::vector<double> &vals, bool trailing_comma) {
+            m << "  \"" << key << "\":[";
+            for (size_t i = 0; i < vals.size(); ++i) {
+                m << std::setprecision(10) << vals[i];
+                if (i + 1 < vals.size()) m << ", ";
+            }
+            m << "]" << (trailing_comma ? "," : "") << "\n";
+        };
+        write_list("SCREEN_OFF_LIST_M", g_scr_offs, true);
+        write_list("ACCEL_OFF_LIST_M", g_acc_offs, true);
+        write_list("SCREEN_RAD_LIST_M", g_scr_rads, true);
+        write_list("ACCEL_RAD_LIST_M", g_acc_rads, true);
+
+        m << "  \"GRID_COUNT\":" << g_grids.size() << ",\n";
+        m << "  \"grids\": [\n";
+        for (size_t gi = 0; gi < g_grids.size(); ++gi) {
+            const auto &grid = g_grids[gi];
+            m << "    {";
+            m << "\"index\":" << gi;
+            m << ", \"name\":\"" << grid.name << "\"";
+            m << ", \"voltage_V\":" << grid.voltage;
+            m << ", \"x0_m\":" << grid.x0;
+            m << ", \"x1_m\":" << grid.x1;
+            m << ", \"thickness_m\":" << grid.thickness;
+            m << ", \"gap_after_m\":" << grid.gap_after;
+            m << ", \"mirror\":" << (grid.mirror ? "true" : "false");
+            m << ", \"mean_radius_m\":" << grid.mean_radius;
+            m << ", \"max_radius_m\":" << grid.max_radius;
+            m << ", \"chamfer\": {";
+            m << "\"up_depth_m\":" << grid.chamfer.up_depth;
+            m << ", \"up_angle_deg\":" << grid.chamfer.up_angle_deg;
+            m << ", \"dn_depth_m\":" << grid.chamfer.dn_depth;
+            m << ", \"dn_angle_deg\":" << grid.chamfer.dn_angle_deg;
+            m << ", \"scaled\":" << (grid.chamfer.scaled ? "true" : "false") << "}";
+            m << ", \"offsets_m\": [";
+            for (size_t i = 0; i < grid.offs.size(); ++i) {
+                m << std::setprecision(10) << grid.offs[i];
+                if (i + 1 < grid.offs.size()) m << ", ";
+            }
+            m << "]";
+            m << ", \"radii_m\": [";
+            for (size_t i = 0; i < grid.rads.size(); ++i) {
+                m << std::setprecision(10) << grid.rads[i];
+                if (i + 1 < grid.rads.size()) m << ", ";
+            }
+            m << "]}";
+            if (gi + 1 < g_grids.size()) m << ",";
+            m << "\n";
+        }
+        m << "  ],\n";
+
+        m << "  \"X_LEFT_M\":" << x_left << ",\n";
+        m << "  \"X_RIGHT_M\":" << x_right << ",\n";
+        m << "  \"X_RIGHT_PHYS_M\":" << x_right_phys << ",\n";
+        m << "  \"TRUNCATED_DRIFT\":" << (truncated_drift ? "true" : "false") << ",\n";
+        m << "  \"XMAX_PHYS_M\":" << xmax_phys << ",\n";
+        m << "  \"YBOX_M\":" << g_ybox << ",\n";
+        m << "  \"SAMPLE_HOLDER\": {"
+          << "\"enabled\":" << (holder_enabled ? "true" : "false")
+          << ", \"height_m\":" << holder_h
+          << ", \"thickness_m\":" << holder_w
+          << ", \"V\":" << holder_v
+          << "},\n";
+
+        m << "  \"VS_V\":" << VS_V << ",\n";
+        m << "  \"VA_V\":" << VA_V << ",\n";
+        m << "  \"potentials\": {\"VS_V\":" << VS_V
+          << ", \"VA_V\":" << VA_V << "},\n";
+        m << "  \"physics\": {"
+          << "\"ENABLE_IONS\":" << ENABLE_IONS
+          << ", \"ION_ITER_MAX\":" << ION_ITER_MAX
+          << ", \"ION_Q_E\":" << ION_Q_E
+          << ", \"ION_M_AMU\":" << ION_M_AMU
+          << ", \"ION_NPART\":" << ION_NPART
+          << ", \"ION_TP_EV\":" << ION_TP_EV
+          << ", \"ION_TT_EV\":" << ION_TT_EV
+          << ", \"PLASMA_NI_M3\":" << PLASMA_NI_M3_META
+          << ", \"PLASMA_TE_EV\":" << PLASMA_TE_EV_META
+          << ", \"PLASMA_UP_V\":" << PLASMA_UP_V_META
+          << ", \"ION_J_SCALE\":" << ION_J_SCALE_META
+          << ", \"SC_FACTOR\":" << SC_FACTOR_META
+          << ", \"SC_RAMP_START_M\":" << SC_RAMP_START_M_META
+          << ", \"SC_RAMP_LEN_M\":" << SC_RAMP_LEN_M_META
+          << "},\n";
+
+        m << "  \"screen_chamfer\": {"
+          << "\"up_depth\":" << scr_du << ", \"up_angle_deg\":" << scr_ua
+          << ", \"dn_depth\":" << scr_dd << ", \"dn_angle_deg\":" << scr_da << "},\n";
+        m << "  \"accel_chamfer\": {"
+          << "\"up_depth\":" << acc_du << ", \"up_angle_deg\":" << acc_ua
+          << ", \"dn_depth\":" << acc_dd << ", \"dn_angle_deg\":" << acc_da << "},\n";
+
+        m << "  \"tube\": {\"x_start\":" << g_tube_x0 << ", \"x_end\":" << g_tube_x1
+          << ", \"wall_t\":" << g_tube_w << ", \"holder_t\":" << g_end_w << "},\n";
+
+        m << "  \"perveance_ref\": {"
+          << "\"V_accel_V\":" << V_accel_V
+          << ", \"V32\":" << V32
+          << ", \"d_eff_m\":" << d_eff_m
+          << ", \"A_ap_m2\":" << A_ap_m2
+          << ", \"q_C\":" << q_C
+          << ", \"m_kg\":" << m_kg
+          << ", \"P_CL_A_per_V32\":" << P_CL_A_per_V32
+          << ", \"I_CL_A\":" << I_CL_A
+          << ", \"N_beamlets_sim\":" << N_beamlets_sim
+          << ", \"P_CL_sys_A_per_V32\":" << P_CL_sys_A_per_V32
+          << ", \"I_CL_sys_A\":" << I_CL_sys_A
+          << "},\n";
+
+        m << "  \"domain\": {\"xmin\":" << xmin << ", \"xmax\":" << xmax
+          << ", \"ymin\":" << -g_ybox << ", \"ymax\":" << g_ybox << "}\n";
+        m << "}\n";
+    }
+
+    // Summary
+    std::printf("# multi-grid 2D (stack + chamfers + BCs + tube/holder)\n");
+    std::printf("VS_V=%g  VA_V=%g  grids=%zu\n", VS_V, VA_V, g_grids.size());
+    for (size_t gi = 0; gi < g_grids.size(); ++gi) {
+        const auto &grid = g_grids[gi];
+        std::printf("grid[%zu] %s: V=%g x=[%g,%g] gap_after=%g aps=%zu mean_r=%g up(depth=%g,ang=%g) dn(depth=%g,ang=%g)\n",
+                    gi, grid.name.c_str(), grid.voltage, grid.x0, grid.x1, grid.gap_after,
+                    grid.offs.size(), grid.mean_radius,
+                    grid.chamfer.up_depth, grid.chamfer.up_angle_deg,
+                    grid.chamfer.dn_depth, grid.chamfer.dn_angle_deg);
+    }
+    std::printf("injector radii: first=%g last=%g\n", a_scr, a_acc);
+    std::printf("beamlets from first grid: %d\n", N_APERTURES);
+    if (using_grid_stack) {
+        std::printf("GRID_STACK=%s\n", grid_stack_raw.c_str());
+    } else {
+        std::printf("APERTURE_PAIRS_M=%s\n", pairs_raw.c_str());
+    }
+    if (scr_scaled) std::printf("NOTE: first-grid chamfers scaled to fit thickness\n");
+    if (acc_scaled) std::printf("NOTE: last-grid chamfers scaled to fit thickness\n");
+    if (holder_enabled) {
+        std::printf("sample holder: x=[%g,%g] y=[%g,%g] V=%g\n",
+                    g_holder_x0, g_holder_x1, -g_holder_hh, g_holder_hh, holder_v);
+    }
+    std::printf("tube walls: x=[%g,%g]  wall_t=%g  holder_t=%g\n",
+                g_tube_x0,g_tube_x1,g_tube_w,g_end_w);
+    std::printf("domain: x=[%g,%g], y=[%g,%g]\n", xmin,xmax,-g_ybox,g_ybox);
+    std::printf("# results dir: %s\n", outdir.c_str());
+
+    // Optional PNG of geometry (and epot contours if solved)
+    const int writepng = envi("WRITE_PNG", 1);
+    const char* pngname  = std::getenv("PNG_NAME") ? std::getenv("PNG_NAME") : "multi_grid_geom.png";
+
+    // Optional Laplace / plasma solve (optionally with ion beam)
+    const int RUN_SOLVE   = envi("RUN_SOLVE", 0);
+
+    if (RUN_SOLVE) {
+        // Common fields
+        EpotField       epot(geom);
+        MeshScalarField scharge(geom);
+        MeshVectorField bfield;         // required by iterate_trajectories()
+        EpotEfield      efield(epot);
+        EpotBiCGSTABSolver solver(geom);
+
+        // Particle DB (only really used when ENABLE_IONS != 0)
+        ParticleDataBase2D pdb(geom);
+        bool use_pdb = false;
+
+        if (!ENABLE_IONS) {
+            // ----------------------------
+            // Original behavior: Laplace
+            // ----------------------------
+            solver.solve(epot, scharge);
+            efield.recalculate();
+
+        } else {
+            // ----------------------------------------
+            // Plasma + ion beam with nonlinear plasma
+            // ----------------------------------------
+
+            // === User-requested plasma parameters ===
+            const double PLASMA_NI_M3 = envd("PLASMA_NI_M3", 5.0e18);  // [m^-3]
+            const double PLASMA_TE_EV = envd("PLASMA_TE_EV", 3.7);     // [eV]
+            const double PLASMA_UP_V  = envd("PLASMA_UP_V", VS_V);     // [V] plasma potential (usually screen/source)
+
+            // Ion species + beam parameters (override via env if needed)
+            const double ION_Q_E      = envd("ION_Q_E",   1.0);        // charge in units of e
+            const double ION_M_AMU    = envd("ION_M_AMU", 40.0);       // mass in amu (Ar+ default)
+            const int    ION_NPART    = envi("ION_NPART", 2000);       // number of trajectories
+            const int    ION_ITER_MAX = envi("ION_ITER_MAX", 8);       // Vlasov iterations
+
+            const double ION_TP_EV    = envd("ION_TP_EV", 0.0);        // parallel temperature [eV]
+            const double ION_TT_EV    = envd("ION_TT_EV", 0.2);        // transverse temperature [eV]
+
+
+            // Perveance & neutralization
+            const double ION_J_SCALE  = envd("ION_J_SCALE", 1.0);      // scale injected current
+            const double SC_FACTOR    = envd("SC_FACTOR",   1.0);      // scale space charge (1 = full SC)
+            const double SC_RAMP_START_M = SC_RAMP_START_M_META;       // start of SCC ramp (m)
+            const double SC_RAMP_LEN_M   = SC_RAMP_LEN_M_META;         // ramp length (m), 0 = step
+
+            use_pdb = true;
+
+            // --- Nonlinear plasma model setup ---
+
+            // Plasma volume: x < xs0 (upstream side of the screen)
+            InitialPlasma initp(AXIS_X, xs0);
+            solver.set_initial_plasma(PLASMA_UP_V, &initp);
+
+            // Background electron density rho_e = -e n_e, used by positive exponential plasma model
+            const double qe  = 1.602176634e-19;       // [C]
+            const double kB  = 1.380649e-23;          // [J/K]
+            const double amu = 1.66053906660e-27;     // [kg]
+
+            const double ne   = PLASMA_NI_M3;         // assume quasi-neutral n_e ≈ n_i
+            const double rhoe = -qe * ne;             // [C/m^3]
+
+            // Enable nonlinear plasma
+            solver.set_pexp_plasma(rhoe, PLASMA_TE_EV, PLASMA_UP_V);
+
+            // --- Derive ion current density J from n_i, T_e (Bohm-like flux) ---
+            const double Te_J  = PLASMA_TE_EV * qe;        // [J]
+            const double mi_kg = ION_M_AMU * amu;
+            double cs = 0.0;
+            if (mi_kg > 0.0)
+                cs = std::sqrt(std::max(Te_J / mi_kg, 0.0));   // ion sound speed
+
+            // J ≈ 0.6 * q * n_i * c_s  [A/m^2], with user scale
+            const double J_Apm2 = ION_J_SCALE * 0.6 * ION_Q_E * qe * ne * cs;
+
+
+            // Full-domain model: no mirror boundaries
+            bool pmirror[6] = { false, false, false, false, false, false };
+            pdb.set_mirror(pmirror);
+
+            // Beam start line: just upstream of the screen aperture, across its open height
+            const double x_emit = std::max(xmin + 2.0*h, xs0 - 2.0*h);
+            const int n_ap = std::max(1, (int)g_scr_offs.size());
+            const int n_part_per = std::max(1, ION_NPART / n_ap);
+
+            // Injection energy: potential drop between plasma and accel side
+            const double E0_ev  = std::max(1.0, std::fabs(PLASMA_UP_V - VA_V));
+
+            for (int it = 0; it < ION_ITER_MAX; ++it) {
+                solver.solve(epot, scharge);
+                efield.recalculate();
+
+                pdb.clear();
+                const size_t n_ap = std::min(g_scr_offs.size(), g_scr_rads.size());
+                for (size_t ai = 0; ai < n_ap; ++ai) {
+                    const double off = g_scr_offs[ai];
+                    const double rad = g_scr_rads[ai];
+                    const double y_lo = off - rad;
+                    const double y_hi = off + rad;
+                    pdb.add_2d_beam_with_energy(
+                        (uint32_t)n_part_per,
+                        J_Apm2,        // current density [A/m^2]
+                        ION_Q_E,
+                        ION_M_AMU,
+                        E0_ev,         // beam energy [eV]
+                        ION_TP_EV,     // parallel temperature [eV]
+                        ION_TT_EV,     // transverse temperature [eV]
+                        x_emit, y_lo,  // start of emission line
+                        x_emit, y_hi   // end of emission line
+                    );
+                }
+                pdb.iterate_trajectories(scharge, efield, bfield);
+
+                // Emulate partial neutralization in the drift
+                if (SC_FACTOR != 1.0) {
+                    const uint32_t nx = scharge.size(0);
+                    const uint32_t ny = scharge.size(1);
+                    const double x0_sc = SC_RAMP_START_M;
+                    const double L_sc = SC_RAMP_LEN_M;
+                    const double inv_L = (L_sc > 0.0) ? (1.0 / L_sc) : 0.0;
+                    const double x_origin = scharge.origo(0);
+                    const double hx = scharge.h();
+
+                    for (uint32_t i = 0; i < nx; ++i) {
+                        const double x = x_origin + hx * i;
+                        double f = 1.0;
+
+                        if (x >= x0_sc) {
+                            if (L_sc > 0.0) {
+                                double t = (x - x0_sc) * inv_L;
+                                t = std::clamp(t, 0.0, 1.0);
+                                f = 1.0 + (SC_FACTOR - 1.0) * t;
+                            } else {
+                                f = SC_FACTOR;
+                            }
+                        }
+
+                        if (f != 1.0) {
+                            for (uint32_t j = 0; j < ny; ++j) {
+                                scharge(i, j) *= f;
+                            }
+                        }
+                    }
+                }
+            }
+            // ====== Beam diagnostics: currents + collimation ======
+            // Only meaningful when ions are enabled and pdb is populated.
+            const double Leff = 0.785 * (2.0 * g_a_scr);
+            // Helper: total current and basic width at a given x-plane
+
+            auto current_and_width_at_plane = [&](double xpos,
+                                                double &Itot,
+                                                double &y_mean,
+                                                double &y_rms0,
+                                                double &y_rms_c,
+                                                double &y_absmax,
+                                                double &y_absmax_c) {
+                TrajectoryDiagnosticData tdata;
+                std::vector<trajectory_diagnostic_e> diag;
+                diag.push_back(DIAG_Y);
+                diag.push_back(DIAG_CURR);
+
+                // Collect diagnostic data at plane x = xpos
+                pdb.trajectories_at_plane(tdata, AXIS_X, xpos, diag);
+
+                const std::vector<double> &y    = tdata(0).data();
+                const std::vector<double> &curr = tdata(1).data();
+
+                Itot     = 0.0;
+                y_mean   = 0.0;
+                y_rms0   = 0.0;
+                y_rms_c  = 0.0;
+                y_absmax = 0.0;
+                y_absmax_c = 0.0;
+
+                const size_t N = curr.size();
+                double sum_wy = 0.0;
+                double sum_wy2 = 0.0;
+                for (size_t i = 0; i < N; ++i) {
+                    const double w  = curr[i];      // current weight (A/m in 2D)
+                    const double yy = y[i];
+                    const double ay = std::fabs(yy);
+
+                    Itot   += w;
+                    sum_wy += w * yy;
+                    sum_wy2 += w * yy * yy;
+                    if (ay > y_absmax) y_absmax = ay;
+                }
+
+                if (Itot > 0.0) {
+                    y_mean = sum_wy / Itot;
+                    y_rms0 = std::sqrt(sum_wy2 / Itot);
+                    const double var = (sum_wy2 / Itot) - (y_mean * y_mean);
+                    y_rms_c = (var > 0.0) ? std::sqrt(var) : 0.0;
+                    for (size_t i = 0; i < N; ++i) {
+                        const double dy = std::fabs(y[i] - y_mean);
+                        if (dy > y_absmax_c) y_absmax_c = dy;
+                    }
+                } else {
+                    y_mean = 0.0;
+                    y_rms0 = 0.0;
+                    y_rms_c = 0.0;
+                    y_absmax_c = 0.0;
+                }
+            };
+
+            // Same as above, but only for particles within a y-window (e.g., sample holder height).
+            auto current_and_width_at_plane_window = [&](double xpos,
+                                                        double y_min,
+                                                        double y_max,
+                                                        double &Itot,
+                                                        double &y_mean,
+                                                        double &y_rms0,
+                                                        double &y_rms_c,
+                                                        double &y_absmax,
+                                                        double &y_absmax_c) {
+                TrajectoryDiagnosticData tdata;
+                std::vector<trajectory_diagnostic_e> diag;
+                diag.push_back(DIAG_Y);
+                diag.push_back(DIAG_CURR);
+
+                pdb.trajectories_at_plane(tdata, AXIS_X, xpos, diag);
+
+                const std::vector<double> &y    = tdata(0).data();
+                const std::vector<double> &curr = tdata(1).data();
+
+                Itot     = 0.0;
+                y_mean   = 0.0;
+                y_rms0   = 0.0;
+                y_rms_c  = 0.0;
+                y_absmax = 0.0;
+                y_absmax_c = 0.0;
+
+                const size_t N = curr.size();
+                double sum_wy = 0.0;
+                double sum_wy2 = 0.0;
+                const double ylo = std::min(y_min, y_max);
+                const double yhi = std::max(y_min, y_max);
+                for (size_t i = 0; i < N; ++i) {
+                    const double yy = y[i];
+                    if (yy < ylo || yy > yhi) continue;
+                    const double w  = curr[i];
+                    const double ay = std::fabs(yy);
+
+                    Itot   += w;
+                    sum_wy += w * yy;
+                    sum_wy2 += w * yy * yy;
+                    if (ay > y_absmax) y_absmax = ay;
+                }
+
+                if (Itot > 0.0) {
+                    y_mean = sum_wy / Itot;
+                    y_rms0 = std::sqrt(sum_wy2 / Itot);
+                    const double var = (sum_wy2 / Itot) - (y_mean * y_mean);
+                    y_rms_c = (var > 0.0) ? std::sqrt(var) : 0.0;
+                    for (size_t i = 0; i < N; ++i) {
+                        const double yy = y[i];
+                        if (yy < ylo || yy > yhi) continue;
+                        const double dy = std::fabs(yy - y_mean);
+                        if (dy > y_absmax_c) y_absmax_c = dy;
+                    }
+                } else {
+                    y_mean = 0.0;
+                    y_rms0 = 0.0;
+                    y_rms_c = 0.0;
+                    y_absmax_c = 0.0;
+                }
+            };
+
+            // ---- 2.1 Currents at PG entrance, AG exit, sample wall ----
+            const double sample_diam_m = envd("SAMPLE_DIAM_M", 6.35e-2);
+            const double sample_rad_m = 0.5 * sample_diam_m;
+
+            // Planes:
+            //  - PG entrance: upstream face of plasma/screen plate
+            //  - AG exit:     downstream face of accel plate
+            //  - Sample wall: just upstream of holder (if enabled)
+            // Probe planes (offset by +0.5*h so we sample *in vacuum*, not on an electrode surface)
+            const double x_pg_plane = xs0 + 0.5*h;
+            const double x_ag_plane = xa1 + 0.5*h;
+            const double x_sm_plane = endplate_enabled
+                                            ? (holder_enabled ? (g_holder_x0 - 0.5*h) : (g_tube_x1 - 0.5*h))
+                                            : std::numeric_limits<double>::quiet_NaN();
+
+            double I_pg_in_Apm  = 0.0, ymean_pg = 0.0, yr_pg  = 0.0, yr_pg_c  = 0.0, ymax_pg  = 0.0, ymax_pg_c  = 0.0;
+            double I_ag_out_Apm = 0.0, ymean_ag = 0.0, yr_ag  = 0.0, yr_ag_c  = 0.0, ymax_ag  = 0.0, ymax_ag_c  = 0.0;
+            double I_sm_Apm     = 0.0, ymean_sm = 0.0, yr_sm  = 0.0, yr_sm_c  = 0.0, ymax_sm  = 0.0, ymax_sm_c  = 0.0;
+
+            current_and_width_at_plane(x_pg_plane, I_pg_in_Apm,  ymean_pg,  yr_pg,  yr_pg_c,  ymax_pg, ymax_pg_c);
+            current_and_width_at_plane(x_ag_plane, I_ag_out_Apm, ymean_ag, yr_ag,  yr_ag_c,  ymax_ag, ymax_ag_c);
+            if (endplate_enabled) {
+                double sample_half = sample_rad_m;
+                if (holder_enabled && g_holder_hh > 0.0) {
+                    if (sample_half > 0.0) {
+                        sample_half = std::min(sample_half, g_holder_hh);
+                    } else {
+                        sample_half = g_holder_hh;
+                    }
+                }
+                if (sample_half > 0.0) {
+                    current_and_width_at_plane_window(
+                        x_sm_plane,
+                        -sample_half,
+                        sample_half,
+                        I_sm_Apm, ymean_sm, yr_sm, yr_sm_c, ymax_sm, ymax_sm_c
+                    );
+                } else {
+                    current_and_width_at_plane(x_sm_plane, I_sm_Apm, ymean_sm, yr_sm, yr_sm_c, ymax_sm, ymax_sm_c);
+                }
+            }
+            // 3D estimates in amps using Leff
+            const double I_pg_in_A  = I_pg_in_Apm  * Leff;
+            const double I_ag_out_A = I_ag_out_Apm * Leff;
+            const double I_sm_A     = I_sm_Apm     * Leff;
+
+            std::printf("[beam] currents: "
+                        "PG entrance = %.3e A/m (%.3e A), "
+                        "AG exit = %.3e A/m (%.3e A), "
+                        "sample = %.3e A/m (%.3e A)\n",
+                        I_pg_in_Apm,  I_pg_in_A,
+                        I_ag_out_Apm, I_ag_out_A,
+                        I_sm_Apm,     I_sm_A);
+
+            // ---- 2.1a Sample radial/diameter profile ----
+              {
+                  const double sample_bin_m = envd("SAMPLE_BIN_M", 5.0e-4);
+                  const double sample_leak_pad_m = envd("SAMPLE_LEAK_PAD_M", 3.0e-3);
+                  const int allow_trunc_profile = envi("SAMPLE_PROFILE_ALLOW_TRUNC", 1);
+                  const double x_profile_env = envd("SAMPLE_PROFILE_X_M", std::numeric_limits<double>::quiet_NaN());
+                  const double x_profile_plane = std::isfinite(x_profile_env)
+                                                     ? x_profile_env
+                                                     : (endplate_enabled ? x_sm_plane : (xmax - 0.5*h));
+                  const bool profile_ok = endplate_enabled || (allow_trunc_profile != 0);
+
+                  if (profile_ok && sample_rad_m > 0.0 && sample_bin_m > 0.0 &&
+                      x_profile_plane > (xmin + 0.5*h) && x_profile_plane < (xmax - 0.5*h)) {
+                      TrajectoryDiagnosticData tdata;
+                      std::vector<trajectory_diagnostic_e> diag;
+                      diag.push_back(DIAG_Y);
+                      diag.push_back(DIAG_CURR);
+                      pdb.trajectories_at_plane(tdata, AXIS_X, x_profile_plane, diag);
+
+                      const std::vector<double> &y    = tdata(0).data();
+                      const std::vector<double> &curr = tdata(1).data();
+                      const size_t N = curr.size();
+
+                      const double y_profile_min = -sample_rad_m - std::max(0.0, sample_leak_pad_m);
+                      const double y_profile_max =  sample_rad_m + std::max(0.0, sample_leak_pad_m);
+                      const double y_profile_span = y_profile_max - y_profile_min;
+                      const int nbins_y = (int)std::ceil(y_profile_span / sample_bin_m);
+                      if (nbins_y > 0) {
+                          std::vector<double> bin_curr_y(nbins_y, 0.0);
+                          std::vector<size_t> bin_cnt_y(nbins_y, 0);
+                          double sum_curr_in = 0.0;
+                          double sum_curr_out = 0.0;
+                          double sum_curr_all = 0.0;
+
+                          for (size_t i = 0; i < N; ++i) {
+                              const double yy = y[i];
+                              const double r = std::fabs(yy);
+                              if (r > sample_rad_m + sample_leak_pad_m) {
+                                  continue;
+                              }
+                              const double w = curr[i];
+                              sum_curr_all += w;
+
+                              int idx_y = (int)std::floor((yy - y_profile_min) / sample_bin_m);
+                              if (idx_y < 0) idx_y = 0;
+                              if (idx_y >= nbins_y) idx_y = nbins_y - 1;
+                              bin_curr_y[idx_y] += w;
+                              bin_cnt_y[idx_y] += 1;
+
+                              if (r <= sample_rad_m) {
+                                  sum_curr_in += w;
+                              } else {
+                                  sum_curr_out += w;
+                              }
+                          }
+
+                          // Diameter profile stats (use in-sample bins only; I_A units)
+                          double peak_to_avg = std::numeric_limits<double>::quiet_NaN();
+                          double rms_nonuniform = std::numeric_limits<double>::quiet_NaN();
+                          double edge_peaking = std::numeric_limits<double>::quiet_NaN();
+                          double sum_in_bins = 0.0;
+                          double sumsq_in_bins = 0.0;
+                          double max_in = 0.0;
+                          double sum_outer = 0.0;
+                          double sum_inner = 0.0;
+                          int cnt_in = 0;
+                          int cnt_outer = 0;
+                          int cnt_inner = 0;
+                          for (int b = 0; b < nbins_y; ++b) {
+                              const double y0 = y_profile_min + b * sample_bin_m;
+                              const double y1 = y0 + sample_bin_m;
+                              const double ymid = 0.5 * (y0 + y1);
+                              const double rmid = std::fabs(ymid);
+                              if (rmid <= sample_rad_m) {
+                                  const double valA = bin_curr_y[b] * Leff;
+                                  sum_in_bins += valA;
+                                  sumsq_in_bins += valA * valA;
+                                  if (valA > max_in) max_in = valA;
+                                  cnt_in += 1;
+                                  if (rmid >= 0.9 * sample_rad_m) {
+                                      sum_outer += valA;
+                                      cnt_outer += 1;
+                                  }
+                                  if (rmid <= 0.5 * sample_rad_m) {
+                                      sum_inner += valA;
+                                      cnt_inner += 1;
+                                  }
+                              }
+                          }
+                          if (cnt_in > 0) {
+                              const double mean_in = sum_in_bins / (double)cnt_in;
+                              if (mean_in > 0.0) {
+                                  peak_to_avg = max_in / mean_in;
+                                  const double mean_sq = sumsq_in_bins / (double)cnt_in;
+                                  const double var = std::max(0.0, mean_sq - mean_in * mean_in);
+                                  rms_nonuniform = std::sqrt(var) / mean_in;
+                                  if (cnt_outer > 0 && cnt_inner > 0) {
+                                      const double mean_outer = sum_outer / (double)cnt_outer;
+                                      const double mean_inner = sum_inner / (double)cnt_inner;
+                                      if (mean_inner > 0.0) {
+                                          edge_peaking = mean_outer / mean_inner;
+                                      }
+                                  }
+                              }
+                          }
+
+                          std::ofstream dj(outdir + "/sample_diameter_profile.json");
+                          dj << "{\n";
+                          dj << "  \"x_plane_m\": " << std::setprecision(10) << x_profile_plane << ",\n";
+                          dj << "  \"sample_diam_m\": " << std::setprecision(10) << sample_diam_m << ",\n";
+                          dj << "  \"sample_rad_m\": " << std::setprecision(10) << sample_rad_m << ",\n";
+                          dj << "  \"leak_pad_m\": " << std::setprecision(10) << std::max(0.0, sample_leak_pad_m) << ",\n";
+                          dj << "  \"bin_width_m\": " << std::setprecision(10) << sample_bin_m << ",\n";
+                          dj << "  \"total_I_Apm\": " << std::setprecision(10) << sum_curr_all << ",\n";
+                          dj << "  \"total_I_A\": " << std::setprecision(10) << (sum_curr_all * Leff) << ",\n";
+                          dj << "  \"total_I_Apm_in\": " << std::setprecision(10) << sum_curr_in << ",\n";
+                          dj << "  \"total_I_Apm_out\": " << std::setprecision(10) << sum_curr_out << ",\n";
+                          dj << "  \"total_I_A_in\": " << std::setprecision(10) << (sum_curr_in * Leff) << ",\n";
+                          dj << "  \"total_I_A_out\": " << std::setprecision(10) << (sum_curr_out * Leff) << ",\n";
+                          dj << "  \"num_samples\": " << N << ",\n";
+                          dj << "  \"stats\": {"
+                             << "\"peak_to_avg\": " << std::setprecision(10) << peak_to_avg
+                             << ", \"rms_nonuniform\": " << std::setprecision(10) << rms_nonuniform
+                             << ", \"edge_peaking_index\": " << std::setprecision(10) << edge_peaking
+                             << ", \"leakage_I_A\": " << std::setprecision(10) << (sum_curr_out * Leff)
+                             << ", \"leakage_frac\": ";
+                          if (sum_curr_all > 0.0) dj << std::setprecision(10) << (sum_curr_out / sum_curr_all); else dj << "0";
+                          dj << ", \"outer_frac\": 0.1, \"inner_frac\": 0.5"
+                             << "},\n";
+                          dj << "  \"bins\": [\n";
+                          for (int b = 0; b < nbins_y; ++b) {
+                              const double y0 = y_profile_min + b * sample_bin_m;
+                              const double y1 = y0 + sample_bin_m;
+                              const double ymid = 0.5 * (y0 + y1);
+                              const bool in_sample = (std::fabs(ymid) <= sample_rad_m);
+                              dj << "    {\"y_lo_m\": " << std::setprecision(10) << y0
+                                 << ", \"y_hi_m\": " << std::setprecision(10) << y1
+                                 << ", \"I_Apm\": " << std::setprecision(10) << bin_curr_y[b]
+                                 << ", \"I_A\": " << std::setprecision(10) << (bin_curr_y[b] * Leff)
+                                 << ", \"fraction\": ";
+                              if (sum_curr_all > 0.0) dj << std::setprecision(10) << (bin_curr_y[b] / sum_curr_all); else dj << "0";
+                              dj << ", \"count\": " << bin_cnt_y[b]
+                                 << ", \"in_sample\": " << (in_sample ? "true" : "false") << "}";
+                              if (b != nbins_y - 1) dj << ",";
+                              dj << "\n";
+                          }
+                          dj << "  ]\n";
+                          dj << "}\n";
+                    }
+                } else if (profile_ok &&
+                           (x_profile_plane <= (xmin + 0.5*h) || x_profile_plane >= (xmax - 0.5*h))) {
+                    std::fprintf(stderr,
+                                 "[beam] WARNING: sample profile plane out of bounds (x=%.6e m); skipping profile.\n",
+                                 x_profile_plane);
+                }
+            }
+
+            // Deflection (centroid steering) between AG exit and right boundary of computed space.
+              const double x_right_plane = endplate_enabled
+                                               ? (g_tube_x1 - g_end_w - 0.5*h)
+                                               : (xmax - 0.5*h);
+              double I_right_Apm = 0.0, ymean_right = 0.0, yr_right = 0.0, yr_right_c = 0.0, ymax_right = 0.0, ymax_right_c = 0.0;
+              bool have_right_plane = false;
+              if (x_right_plane > x_ag_plane + 2.0*h) {
+                  current_and_width_at_plane(x_right_plane, I_right_Apm, ymean_right, yr_right, yr_right_c, ymax_right, ymax_right_c);
+                  have_right_plane = (I_right_Apm > 0.0);
+              }
+
+            double steer_angle_deg = std::numeric_limits<double>::quiet_NaN();
+            double y_mean_pred_400mm_m = std::numeric_limits<double>::quiet_NaN();
+            double y_mean_pred_500mm_m = std::numeric_limits<double>::quiet_NaN();
+            double y_mean_pred_600mm_m = std::numeric_limits<double>::quiet_NaN();
+            double ymean_slope = std::numeric_limits<double>::quiet_NaN();
+              bool   have_steer = false;
+
+              if (have_right_plane && I_ag_out_Apm > 0.0) {
+                const double dx = x_right_plane - x_ag_plane;
+                if (dx > 0.0) {
+                    ymean_slope = (ymean_right - ymean_ag) / dx;
+                    have_steer = std::isfinite(ymean_slope);
+                    if (have_steer) {
+                        steer_angle_deg = rad2deg(std::atan(ymean_slope));
+                        y_mean_pred_400mm_m = ymean_ag + ymean_slope * 0.4;
+                        y_mean_pred_500mm_m = ymean_ag + ymean_slope * 0.5;
+                        y_mean_pred_600mm_m = ymean_ag + ymean_slope * 0.6;
+                    }
+                }
+              }
+
+
+            // ---- 2.2 Collimation scan between AG exit and sample ----
+
+            const int    Nplanes    = envi("BEAM_COL_NPLANES", 32);
+            const double margin     = envd("BEAM_COL_MARGIN_M", 2.0*h);   // stay a bit away from sample wall
+            const double x_start    = xa1;                // start at accel exit
+            const double x_end      = g_tube_x1 - (endplate_enabled ? g_end_w : 0.0) - margin; // end just before holder
+            const double tube_inner = g_ybox - g_tube_w;  // half-height of free tube aperture
+
+            struct PlaneSample {
+                double x_m;
+                double y_mean_m;
+                double y_rms_c_m;
+                double y_absmax_m;
+                double I_Apm;
+            };
+            std::vector<PlaneSample> planes;
+            planes.reserve(std::max(Nplanes, 0));
+
+            double y_rms_max    = 0.0;
+            double y_rms_c_max  = 0.0;
+            double y_absmax_max = 0.0;
+            bool   lost_sidewalls = false;
+
+            for (int ip = 0; ip < Nplanes; ++ip) {
+                const double s  = (Nplanes > 1) ? double(ip) / double(Nplanes - 1) : 0.0;
+                const double xp = x_start + s * (x_end - x_start);
+
+                double I_plane = 0.0, ymean = 0.0, yr = 0.0, yr_c = 0.0, ymax = 0.0, ymax_c = 0.0;
+                current_and_width_at_plane(xp, I_plane, ymean, yr, yr_c, ymax, ymax_c);
+
+                if (I_plane <= 0.0)
+                    continue;  // no trajectories crossing here
+
+                if (yr > y_rms_max)      y_rms_max    = yr;
+                if (yr_c > y_rms_c_max)  y_rms_c_max  = yr_c;
+                if (ymax > y_absmax_max) y_absmax_max = ymax;
+
+                planes.push_back({xp, ymean, yr_c, ymax, I_plane});
+
+                // If any significant current reaches near the tube inner radius, flag it.
+                if (ymax >= 0.99 * tube_inner) {
+                    lost_sidewalls = true;
+                }
+            }
+
+            // -------------------------------------------------------------------------
+            // Moment/envelope prediction to the *physical* drift end (x_right_phys).
+            // This lets us truncate the simulated drift (X_RIGHT_M) while still estimating
+            // whether the beam will hit the tube wall further downstream.
+            //
+            // Model (simple, robust): r'' = K_eff / r, where r is the *centered RMS* radius and
+            // K_eff is inferred from 3 centered-RMS samples just after the accel grid exit.
+            // -------------------------------------------------------------------------
+            bool   env_ok        = false;
+            std::string env_reason;
+            double footprint_pred_m = std::numeric_limits<double>::quiet_NaN(); // predicted absmax at x_phys_end
+            double clearance_pred_m = std::numeric_limits<double>::quiet_NaN();
+            double x_hit_pred_m     = std::numeric_limits<double>::quiet_NaN();
+            double max_abs_pred_m   = std::numeric_limits<double>::quiet_NaN();
+            int    hits_tube_pred   = 0;
+            double div_angle_deg    = std::numeric_limits<double>::quiet_NaN();
+
+            double footprint_pred_400mm_m = std::numeric_limits<double>::quiet_NaN();
+            double footprint_pred_500mm_m = std::numeric_limits<double>::quiet_NaN();
+            double footprint_pred_600mm_m = std::numeric_limits<double>::quiet_NaN();
+
+            const double x_phys_end = xmax_phys - g_end_w - 0.5*h; // approx "sample plane" of the full-length geometry
+            const double x_targets[3] = { x_ag_plane + 0.4, x_ag_plane + 0.5, x_ag_plane + 0.6 };
+            double r_targets[3] = {
+                std::numeric_limits<double>::quiet_NaN(),
+                std::numeric_limits<double>::quiet_NaN(),
+                std::numeric_limits<double>::quiet_NaN()
+            };
+            bool got_targets[3] = { false, false, false };
+            double r_end = std::numeric_limits<double>::quiet_NaN();
+            bool got_phys_end = false;
+
+            // Minimal JSON string escaper for diagnostics.
+            auto json_q = []( const std::string &s ) -> std::string {
+                std::string o; o.reserve(s.size()+8);
+                o.push_back('"');
+                for( char c : s ) {
+                    switch(c) {
+                    case '\\': o += "\\\\"; break;
+                    case '"':  o += "\\\""; break;
+                    case '\n': o += "\\n"; break;
+                    case '\r': o += "\\r"; break;
+                    case '\t': o += "\\t"; break;
+                    default:   o.push_back(c); break;
+                    }
+                }
+                o.push_back('"');
+                return o;
+            };
+
+            if( x_phys_end <= x_ag_plane + 2.0*h ) {
+                env_reason = "x_phys_end too close to AG exit";
+            } else {
+                // Need a little simulated drift after AG exit to estimate curvature.
+                double dx_probe = envd("ENV_PROBE_DX_M", 1.0e-3);
+                dx_probe = std::max(dx_probe, 2.0*h);
+
+                const double max_dx = (xmax - x_ag_plane - 6.0*h)/3.0;
+                if( max_dx <= 2.0*h ) {
+                    env_reason = "not enough simulated drift to estimate curvature";
+                } else {
+                    dx_probe = std::min(dx_probe, max_dx);
+
+                    const double x0 = x_ag_plane + dx_probe;
+                    const double x1 = x0 + dx_probe;
+                    const double x2 = x1 + dx_probe;
+
+                    double I0_Apm=0.0, y0_mean=0.0, r0=0.0, r0c=0.0, a0=0.0, a0c=0.0;
+                    double I1_Apm=0.0, y1_mean=0.0, r1=0.0, r1c=0.0, a1=0.0, a1c=0.0;
+                    double I2_Apm=0.0, y2_mean=0.0, r2=0.0, r2c=0.0, a2=0.0, a2c=0.0;
+
+                    current_and_width_at_plane(x0, I0_Apm, y0_mean, r0, r0c, a0, a0c);
+                    current_and_width_at_plane(x1, I1_Apm, y1_mean, r1, r1c, a1, a1c);
+                    current_and_width_at_plane(x2, I2_Apm, y2_mean, r2, r2c, a2, a2c);
+
+                    if( I0_Apm <= 0.0 || r0c <= 0.0 ||
+                        !std::isfinite(r0c) || !std::isfinite(r1c) || !std::isfinite(r2c) ) {
+                        env_reason = "insufficient beam at probe planes";
+                    } else {
+                        const double rp0  = (r1c - r0c) / dx_probe;
+                        const double rpp0 = (r2c - 2.0*r1c + r0c) / (dx_probe*dx_probe);
+
+                        // Average divergence angle from *centered* RMS growth rate.
+                        const double rp_avg = (r2c - r0c) / (2.0*dx_probe);
+                        if (std::isfinite(rp_avg)) {
+                            const double rp_use = std::max(0.0, rp_avg);
+                            div_angle_deg = rad2deg(std::atan(rp_use));
+                        }
+
+                        double K_eff = r0c * rpp0;
+                        if( !std::isfinite(K_eff) ) K_eff = 0.0;
+                        if( K_eff < 0.0 ) K_eff = 0.0; // clamp: we only model divergence here
+
+                        // Convert centered RMS -> "footprint" using measured absmax(centered)/RMS(centered) at x0.
+                        double abs_ratio = (a0c > 0.0 && r0c > 0.0) ? (a0c / r0c) : 0.0;
+                        if( !(abs_ratio > 0.0) || !std::isfinite(abs_ratio) ) abs_ratio = 3.0;
+
+                        double dx_env = envd("ENV_STEP_M", 2.0e-3);
+                        dx_env = std::max(dx_env, 1.0e-4);
+                        dx_env = std::min(dx_env, 1.0e-2);
+
+                        double x  = x0;
+                        double r  = r0c;
+                        double rp = rp0;
+
+                        auto mean_pred_at = [&](double xpred) -> double {
+                            if (have_steer) {
+                                return ymean_ag + ymean_slope * (xpred - x_ag_plane);
+                            }
+                            if (I_ag_out_Apm > 0.0 && std::isfinite(ymean_ag)) {
+                                return ymean_ag;
+                            }
+                            return std::numeric_limits<double>::quiet_NaN();
+                        };
+
+                        max_abs_pred_m = abs_ratio * r;
+                        hits_tube_pred = 0;
+
+                        const double x_max_target = std::max(x_phys_end,
+                            std::max(x_targets[0], std::max(x_targets[1], x_targets[2])));
+
+                        while( x < x_max_target ) {
+                            const double step = std::min(dx_env, x_max_target - x);
+                            const double rpp  = (r > 1.0e-12) ? (K_eff / r) : 0.0;
+
+                            rp += rpp * step;
+                            r  += rp  * step;
+                            x  += step;
+
+                            if( !std::isfinite(r) || r < 0.0 ) {
+                                env_reason = "envelope diverged numerically";
+                                break;
+                            }
+
+                            if (x <= x_phys_end + 1.0e-12) {
+                                double abs_now = abs_ratio * r;
+                                if (have_steer) {
+                                    const double ymean_pred = mean_pred_at(x);
+                                    if (std::isfinite(ymean_pred)) {
+                                        abs_now = std::fabs(ymean_pred) + abs_ratio * r;
+                                    }
+                                }
+                                if( abs_now > max_abs_pred_m ) max_abs_pred_m = abs_now;
+                                if( !hits_tube_pred && abs_now >= tube_inner ) {
+                                    hits_tube_pred = 1;
+                                    x_hit_pred_m   = x;
+                                }
+                            }
+                            if (!got_phys_end && x >= x_phys_end) {
+                                got_phys_end = true;
+                                r_end = r;
+                            }
+                            for (int ti = 0; ti < 3; ++ti) {
+                                if (!got_targets[ti] && x >= x_targets[ti]) {
+                                    got_targets[ti] = true;
+                                    r_targets[ti] = r;
+                                }
+                            }
+                        }
+
+                        if( env_reason.empty() ) {
+                            if (got_phys_end && std::isfinite(r_end)) {
+                                double abs_end = abs_ratio * r_end;
+                                if (have_steer) {
+                                    const double ymean_pred = mean_pred_at(x_phys_end);
+                                    if (std::isfinite(ymean_pred)) {
+                                        abs_end = std::fabs(ymean_pred) + abs_ratio * r_end;
+                                    }
+                                }
+                                footprint_pred_m = abs_end;
+                                clearance_pred_m = tube_inner - footprint_pred_m;
+                                env_ok = std::isfinite(footprint_pred_m);
+                            } else {
+                                env_reason = "missing envelope at physical end";
+                            }
+                            if (got_targets[0] && std::isfinite(r_targets[0])) {
+                                double abs_t = abs_ratio * r_targets[0];
+                                if (std::isfinite(y_mean_pred_400mm_m)) {
+                                    abs_t = std::fabs(y_mean_pred_400mm_m) + abs_ratio * r_targets[0];
+                                }
+                                footprint_pred_400mm_m = abs_t;
+                            }
+                            if (got_targets[1] && std::isfinite(r_targets[1])) {
+                                double abs_t = abs_ratio * r_targets[1];
+                                if (std::isfinite(y_mean_pred_500mm_m)) {
+                                    abs_t = std::fabs(y_mean_pred_500mm_m) + abs_ratio * r_targets[1];
+                                }
+                                footprint_pred_500mm_m = abs_t;
+                            }
+                            if (got_targets[2] && std::isfinite(r_targets[2])) {
+                                double abs_t = abs_ratio * r_targets[2];
+                                if (std::isfinite(y_mean_pred_600mm_m)) {
+                                    abs_t = std::fabs(y_mean_pred_600mm_m) + abs_ratio * r_targets[2];
+                                }
+                                footprint_pred_600mm_m = abs_t;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Write standalone envelope_pred.json (handy for debugging / plotting).
+            {
+                std::ofstream ej(outdir + "/envelope_pred.json");
+                ej << "{\n";
+                ej << "  \"ok\": " << (env_ok ? "true" : "false") << ",\n";
+                ej << "  \"reason\": " << json_q(env_reason) << ",\n";
+                ej << "  \"truncated_drift\": " << (truncated_drift ? "true" : "false") << ",\n";
+                ej << "  \"xmax_m\": " << std::setprecision(10) << xmax << ",\n";
+                ej << "  \"xmax_phys_m\": " << std::setprecision(10) << xmax_phys << ",\n";
+                ej << "  \"x_ag_plane_m\": " << std::setprecision(10) << x_ag_plane << ",\n";
+                ej << "  \"x_phys_end_m\": " << std::setprecision(10) << x_phys_end << ",\n";
+                ej << "  \"tube_inner_m\": " << std::setprecision(10) << tube_inner << ",\n";
+                ej << "  \"hits_tube_pred\": ";
+                if( env_ok ) ej << (hits_tube_pred ? "true" : "false"); else ej << "null";
+                ej << ",\n";
+                ej << "  \"x_hit_pred_m\": ";
+                if( env_ok && std::isfinite(x_hit_pred_m) ) ej << std::setprecision(10) << x_hit_pred_m; else ej << "null";
+                ej << ",\n";
+                ej << "  \"footprint_pred_m\": ";
+                if( env_ok && std::isfinite(footprint_pred_m) ) ej << std::setprecision(10) << footprint_pred_m; else ej << "null";
+                ej << ",\n";
+                ej << "  \"footprint_pred_400mm_m\": ";
+                if( env_ok && std::isfinite(footprint_pred_400mm_m) ) ej << std::setprecision(10) << footprint_pred_400mm_m; else ej << "null";
+                ej << ",\n";
+                ej << "  \"footprint_pred_500mm_m\": ";
+                if( env_ok && std::isfinite(footprint_pred_500mm_m) ) ej << std::setprecision(10) << footprint_pred_500mm_m; else ej << "null";
+                ej << ",\n";
+                ej << "  \"footprint_pred_600mm_m\": ";
+                if( env_ok && std::isfinite(footprint_pred_600mm_m) ) ej << std::setprecision(10) << footprint_pred_600mm_m; else ej << "null";
+                ej << ",\n";
+                ej << "  \"clearance_pred_m\": ";
+                if( env_ok && std::isfinite(clearance_pred_m) ) ej << std::setprecision(10) << clearance_pred_m; else ej << "null";
+                ej << ",\n";
+                ej << "  \"divergence_angle_deg\": ";
+                if( std::isfinite(div_angle_deg) ) ej << std::setprecision(10) << div_angle_deg; else ej << "null";
+                ej << ",\n";
+                ej << "  \"max_abs_pred_m\": ";
+                if( env_ok && std::isfinite(max_abs_pred_m) ) ej << std::setprecision(10) << max_abs_pred_m; else ej << "null";
+                ej << "\n";
+                ej << "}\n";
+            }
+            // ---- 2.3 High-level beam summary for Stage-2 optimizer ----
+            {
+                // Does any beam actually reach the sample plane?
+                const bool has_sample_beam = endplate_enabled ? (I_sm_Apm > 0.0) : (I_ag_out_Apm > 0.0);
+
+                // “Good” single beam: reaches sample, does not graze tube inner wall.
+                const bool good_single_beam =
+                    has_sample_beam &&
+                    !lost_sidewalls &&
+                    (y_absmax_max < tube_inner) &&
+                    (!endplate_enabled || (ymax_sm < tube_inner));
+
+                std::ofstream mj(outdir + "/beam_metrics.json");
+                mj << "{\n";
+                mj << "  \"truncated_drift\": " << (truncated_drift ? "true" : "false") << ",\n";
+                mj << "  \"envelope_ok\": " << (env_ok ? "true" : "false") << ",\n";
+                mj << "  \"xmax_phys_m\": " << std::setprecision(10) << xmax_phys << ",\n";
+                mj << "  \"x_phys_end_m\": " << std::setprecision(10) << x_phys_end << ",\n";
+                mj << "  \"FOOTPRINT_PRED_M\": ";
+                if( env_ok && std::isfinite(footprint_pred_m) ) mj << std::setprecision(10) << footprint_pred_m; else mj << "null";
+                mj << ",\n";
+                mj << "  \"FOOTPRINT_PRED_400MM_M\": ";
+                if( env_ok && std::isfinite(footprint_pred_400mm_m) ) mj << std::setprecision(10) << footprint_pred_400mm_m; else mj << "null";
+                mj << ",\n";
+                mj << "  \"FOOTPRINT_PRED_500MM_M\": ";
+                if( env_ok && std::isfinite(footprint_pred_500mm_m) ) mj << std::setprecision(10) << footprint_pred_500mm_m; else mj << "null";
+                mj << ",\n";
+                mj << "  \"FOOTPRINT_PRED_600MM_M\": ";
+                if( env_ok && std::isfinite(footprint_pred_600mm_m) ) mj << std::setprecision(10) << footprint_pred_600mm_m; else mj << "null";
+                mj << ",\n";
+                mj << "  \"CLEARANCE_PRED_M\": ";
+                if( env_ok && std::isfinite(clearance_pred_m) ) mj << std::setprecision(10) << clearance_pred_m; else mj << "null";
+                mj << ",\n";
+                mj << "  \"HITS_TUBE_PRED\": ";
+                if( env_ok ) mj << (hits_tube_pred ? "true" : "false"); else mj << "null";
+                mj << ",\n";
+                mj << "  \"X_HIT_PRED_M\": ";
+                if( env_ok && std::isfinite(x_hit_pred_m) ) mj << std::setprecision(10) << x_hit_pred_m; else mj << "null";
+                mj << ",\n";
+                mj << "  \"DIVERGENCE_ANGLE_DEG\": ";
+                if( std::isfinite(div_angle_deg) ) mj << std::setprecision(10) << div_angle_deg; else mj << "null";
+                mj << ",\n";
+                  mj << "  \"sample\": {\n";
+                  mj << "    \"I_Apm\": "      << std::setprecision(10) << I_sm_Apm  << ",\n";
+                  mj << "    \"I_A\": "        << std::setprecision(10) << I_sm_A    << ",\n";
+                  mj << "    \"y_rms_m\": "    << std::setprecision(10) << yr_sm     << ",\n";
+                  mj << "    \"y_absmax_m\": " << std::setprecision(10) << ymax_sm   << "\n";
+                  mj << "  },\n";
+                  mj << "  \"currents\": {\n";
+                  mj << "    \"I_pg_in_Apm\": "   << std::setprecision(10) << I_pg_in_Apm  << ",\n";
+                  mj << "    \"I_ag_out_Apm\": "  << std::setprecision(10) << I_ag_out_Apm << ",\n";
+                  mj << "    \"I_pg_in_A\": "     << std::setprecision(10) << I_pg_in_A    << ",\n";
+                  mj << "    \"I_ag_out_A\": "    << std::setprecision(10) << I_ag_out_A   << "\n";
+                  mj << "  },\n";
+                mj << "  \"collimation\": {\n";
+                mj << "    \"y_rms_max_m\": "      << std::setprecision(10) << y_rms_max    << ",\n";
+                mj << "    \"y_rms_c_max_m\": "    << std::setprecision(10) << y_rms_c_max  << ",\n";
+                mj << "    \"y_absmax_max_m\": "   << std::setprecision(10) << y_absmax_max << ",\n";
+                mj << "    \"tube_inner_half_m\": " << std::setprecision(10) << tube_inner   << ",\n";
+                mj << "    \"lost_to_sidewalls\": " << (lost_sidewalls   ? "true" : "false") << ",\n";
+                mj << "    \"good_single_beam\": "  << (good_single_beam ? "true" : "false") << ",\n";
+                mj << "    \"has_sample_beam\": "   << (has_sample_beam  ? "true" : "false") << "\n";
+                mj << "  }\n";
+                mj << ",\n";
+                  mj << "  \"deflection\": {\n";
+                  mj << "    \"x_ag_plane_m\": " << std::setprecision(10) << x_ag_plane << ",\n";
+                  mj << "    \"x_right_plane_m\": " << std::setprecision(10) << x_right_plane << ",\n";
+                  mj << "    \"y_mean_ag_m\": " << std::setprecision(10) << ymean_ag << ",\n";
+                  mj << "    \"y_mean_right_m\": " << std::setprecision(10) << ymean_right << ",\n";
+                  mj << "    \"y_rms_c_ag_m\": " << std::setprecision(10) << yr_ag_c << ",\n";
+                  mj << "    \"y_rms_c_right_m\": " << std::setprecision(10) << yr_right_c << ",\n";
+                  mj << "    \"steer_angle_deg\": ";
+                  if (std::isfinite(steer_angle_deg)) mj << std::setprecision(10) << steer_angle_deg; else mj << "null";
+                  mj << ",\n";
+                  mj << "    \"y_mean_pred_400mm_m\": ";
+                if (std::isfinite(y_mean_pred_400mm_m)) mj << std::setprecision(10) << y_mean_pred_400mm_m; else mj << "null";
+                mj << ",\n";
+                mj << "    \"y_mean_pred_500mm_m\": ";
+                if (std::isfinite(y_mean_pred_500mm_m)) mj << std::setprecision(10) << y_mean_pred_500mm_m; else mj << "null";
+                mj << ",\n";
+                mj << "    \"y_mean_pred_600mm_m\": ";
+                  if (std::isfinite(y_mean_pred_600mm_m)) mj << std::setprecision(10) << y_mean_pred_600mm_m; else mj << "null";
+                  mj << "\n";
+                  mj << "  }\n";
+                  mj << ",\n";
+                  mj << "  \"planes\": [\n";
+                  for (size_t pi = 0; pi < planes.size(); ++pi) {
+                      const auto &p = planes[pi];
+                      mj << "    {\"x_m\": " << std::setprecision(10) << p.x_m
+                         << ", \"y_mean_m\": " << std::setprecision(10) << p.y_mean_m
+                         << ", \"y_rms_c_m\": " << std::setprecision(10) << p.y_rms_c_m
+                         << ", \"y_absmax_m\": " << std::setprecision(10) << p.y_absmax_m
+                         << ", \"I_A\": " << std::setprecision(10) << (p.I_Apm * Leff) << "}";
+                      if (pi + 1 < planes.size()) mj << ",";
+                      mj << "\n";
+                  }
+                  mj << "  ],\n";
+                // Perveance numbers (geometric from simulated current, plus CL reference and normalized perveance)
+//
+// IMPORTANT NOTE (truncated drift):
+// If you shrink X_RIGHT_M to drop most of the downstream drift tube, the "sample plane" diagnostic
+// may land outside the physically modeled region (or very near an open/Neumann boundary).
+// In that case it is common to see I_sm_A -> 0 even when the extracted beam at the accelerator exit
+// is healthy. For perveance tracking we therefore *default* to AG-exit current and also report the
+// "true" sample-plane perveance separately when available.
+const double I_pg_in_A_per  = (N_beamlets_sim > 0.0) ? (I_pg_in_A  / N_beamlets_sim) : I_pg_in_A;
+const double I_ag_out_A_per = (N_beamlets_sim > 0.0) ? (I_ag_out_A / N_beamlets_sim) : I_ag_out_A;
+const double I_sm_A_per     = (N_beamlets_sim > 0.0) ? (I_sm_A     / N_beamlets_sim) : I_sm_A;
+const double P_geom_pg_A_per_V32 = (V32 > 0.0) ? (I_pg_in_A_per  / V32) : 0.0;
+const double P_geom_ag_A_per_V32 = (V32 > 0.0) ? (I_ag_out_A_per / V32) : 0.0;
+
+// True sample-plane perveance (only meaningful when the sample plane is physically present)
+const double P_geom_sm_true_A_per_V32 = (V32 > 0.0) ? (I_sm_A_per / V32) : 0.0;
+
+// Back-compat: the "sm" perveance fields now follow AG-exit current to avoid spurious zeros
+const double P_geom_sm_A_per_V32 = P_geom_ag_A_per_V32;
+
+const double Pnorm_pg = (P_CL_A_per_V32 > 0.0) ? (P_geom_pg_A_per_V32 / P_CL_A_per_V32) : 0.0;
+const double Pnorm_ag = (P_CL_A_per_V32 > 0.0) ? (P_geom_ag_A_per_V32 / P_CL_A_per_V32) : 0.0;
+const double Pnorm_sm_true = (P_CL_A_per_V32 > 0.0) ? (P_geom_sm_true_A_per_V32 / P_CL_A_per_V32) : 0.0;
+const double Pnorm_sm = Pnorm_ag;
+
+const double I_sys_pg_A = I_pg_in_A_per  * N_beamlets_sim;
+const double I_sys_ag_A = I_ag_out_A_per * N_beamlets_sim;
+const double I_sys_sm_true_A = I_sm_A_per * N_beamlets_sim;
+
+// Back-compat: I_sample_A reported in the perveance block follows AG-exit current
+const double I_sys_sm_A = I_sys_ag_A;
+
+const double P_sys_geom_pg_A_per_V32 = P_geom_pg_A_per_V32 * N_beamlets_sim;
+const double P_sys_geom_ag_A_per_V32 = P_geom_ag_A_per_V32 * N_beamlets_sim;
+const double P_sys_geom_sm_true_A_per_V32 = P_geom_sm_true_A_per_V32 * N_beamlets_sim;
+
+// Back-compat: system "sm" perveance follows AG-exit current
+const double P_sys_geom_sm_A_per_V32 = P_sys_geom_ag_A_per_V32;
+
+const double P_sys_norm_pg = (P_CL_sys_A_per_V32 > 0.0) ? (P_sys_geom_pg_A_per_V32 / P_CL_sys_A_per_V32) : 0.0;
+const double P_sys_norm_ag = (P_CL_sys_A_per_V32 > 0.0) ? (P_sys_geom_ag_A_per_V32 / P_CL_sys_A_per_V32) : 0.0;
+const double P_sys_norm_sm_true = (P_CL_sys_A_per_V32 > 0.0) ? (P_sys_geom_sm_true_A_per_V32 / P_CL_sys_A_per_V32) : 0.0;
+const double P_sys_norm_sm = P_sys_norm_ag;
+
+
+                mj << "  \"perveance\": {\n";
+                mj << "    \"V_accel_V\": " << std::setprecision(10) << V_accel_V << ",\n";
+                mj << "    \"V32\": "       << std::setprecision(10) << V32       << ",\n";
+                mj << "    \"d_eff_m\": "   << std::setprecision(10) << d_eff_m   << ",\n";
+                mj << "    \"P_CL_A_per_V32\": " << std::setprecision(10) << P_CL_A_per_V32 << ",\n";
+                mj << "    \"I_CL_A\": "         << std::setprecision(10) << I_CL_A         << ",\n";
+                mj << "    \"N_beamlets_sim\": " << std::setprecision(10) << N_beamlets_sim << ",\n";
+                mj << "    \"P_CL_sys_A_per_V32\": " << std::setprecision(10) << P_CL_sys_A_per_V32 << ",\n";
+                mj << "    \"I_CL_sys_A\": "         << std::setprecision(10) << I_CL_sys_A         << ",\n";
+
+                mj << "    \"beamlet\": {\n";
+                mj << "      \"P_geom_pg_A_per_V32\": " << std::setprecision(10) << P_geom_pg_A_per_V32 << ",\n";
+                mj << "      \"P_geom_ag_A_per_V32\": " << std::setprecision(10) << P_geom_ag_A_per_V32 << ",\n";
+                mj << "      \"P_geom_sm_A_per_V32\": " << std::setprecision(10) << P_geom_sm_A_per_V32 << ",\n";
+                mj << "      \"P_geom_sm_true_A_per_V32\": " << std::setprecision(10) << P_geom_sm_true_A_per_V32 << ",\n";
+                mj << "      \"P_norm_pg\": " << std::setprecision(10) << Pnorm_pg << ",\n";
+                mj << "      \"P_norm_ag\": " << std::setprecision(10) << Pnorm_ag << ",\n";
+                mj << "      \"P_norm_sm\": " << std::setprecision(10) << Pnorm_sm << ",\n";
+                mj << "      \"P_norm_sm_true\": " << std::setprecision(10) << Pnorm_sm_true << "\n";
+                mj << "    },\n";
+
+                mj << "    \"system\": {\n";
+                mj << "      \"I_pg_in_A\": "   << std::setprecision(10) << I_sys_pg_A << ",\n";
+                mj << "      \"I_ag_out_A\": "  << std::setprecision(10) << I_sys_ag_A << ",\n";
+                mj << "      \"I_sample_A\": "  << std::setprecision(10) << I_sys_sm_A << ",\n";
+                mj << "      \"I_sample_true_A\": "  << std::setprecision(10) << I_sys_sm_true_A << ",\n";
+                mj << "      \"P_geom_pg_A_per_V32\": " << std::setprecision(10) << P_sys_geom_pg_A_per_V32 << ",\n";
+                mj << "      \"P_geom_ag_A_per_V32\": " << std::setprecision(10) << P_sys_geom_ag_A_per_V32 << ",\n";
+                mj << "      \"P_geom_sm_A_per_V32\": " << std::setprecision(10) << P_sys_geom_sm_A_per_V32 << ",\n";
+                mj << "      \"P_geom_sm_true_A_per_V32\": " << std::setprecision(10) << P_sys_geom_sm_true_A_per_V32 << ",\n";
+                mj << "      \"P_norm_pg\": " << std::setprecision(10) << P_sys_norm_pg << ",\n";
+                mj << "      \"P_norm_ag\": " << std::setprecision(10) << P_sys_norm_ag << ",\n";
+                mj << "      \"P_norm_sm\": " << std::setprecision(10) << P_sys_norm_sm << ",\n";
+                mj << "      \"P_norm_sm_true\": " << std::setprecision(10) << P_sys_norm_sm_true << "\n";
+                mj << "    }\n";
+
+                mj << "  }\n";
+                mj << "}\n";
+            }
+
+
+            if (lost_sidewalls) {
+                std::fprintf(stderr,
+                            "[beam] ERROR: beam reaches tube inner wall (|y| >= %.3e m) "
+                            "between AG exit and sample; significant loss to sidewalls likely.\n",
+                            tube_inner);
+            }
+
+        }
+
+        t_after_solve = SteadyClock::now();
+
+        t_after_diag = SteadyClock::now();
+
+        if (writepng) {
+            // Full view
+	    const int FONT_PX = envi("PLOT_FONT_PX", 22);
+            GeomPlotter gp(geom);
+            gp.set_size(1600, 800);
+            gp.set_view(VIEW_XY, -1);
+            gp.set_epot(&epot);
+	    gp.set_font_size(FONT_PX);
+            gp.set_efield(&efield);
+            if (use_pdb) {
+                gp.set_particle_database(&pdb);  // overlay ion trajectories when ENABLE_IONS=1
+            }
+            gp.plot_png(png.c_str());
+            std::printf("wrote PNG (with epot/efield%s): %s\n",
+                        use_pdb ? " + beam" : "", png.c_str());
+
+            // Close-up around the grids (per beamlet pair when multiple apertures)
+            const double pad = envd("CLOSE_PAD_M", 5e-4);  // 0.5 mm default
+            double x0 = xs0 - pad;
+            double x1 = xa1 + pad;
+
+            double max_delta2 = 0.0;
+            for (const auto &grid : g_grids) {
+                max_delta2 = std::max(max_delta2,
+                                      std::max(grid.chamfer.up_depth * grid.chamfer.up_slope,
+                                               grid.chamfer.dn_depth * grid.chamfer.dn_slope));
+            }
+
+            auto plot_closeup = [&](double ylo, double yhi, const std::string &outpath) {
+                const double y_center = 0.5 * (ylo + yhi);
+                const double y_span = std::max(std::fabs(ylo - y_center),
+                                               std::fabs(yhi - y_center));
+                double ymax_local = y_span + a_max + max_delta2 + pad;
+                double y0 = y_center - ymax_local, y1 = y_center + ymax_local;
+
+                // aspect-preserving size: 800 px tall, width scaled by xr/yr
+                const int   BASE = envi("CLOSE_BASE_PX", 800);
+                const double xr = x1 - x0, yr = y1 - y0;
+                const int   H = BASE;
+                const int   W = std::max(1, int(std::lround(BASE * (xr/yr))));
+
+                GeomPlotter gpc(geom);
+                gpc.set_view(VIEW_XY, -1);
+                gpc.set_epot(&epot);
+                gpc.set_efield(&efield);
+                if (use_pdb) {
+                    gpc.set_particle_database(&pdb);
+                }
+                gpc.set_ranges(x0, y0, x1, y1);
+                gpc.set_font_size(FONT_PX);
+                gpc.set_size(W, H);
+                gpc.plot_png(outpath.c_str());
+            };
+
+            std::vector<std::pair<double,double>> close_pairs;
+            const size_t n_close = std::max(g_scr_offs.size(), g_acc_offs.size());
+            close_pairs.reserve(n_close > 0 ? n_close : 1);
+            const double eps = 1.0e-12;
+            for (size_t i = 0; i < n_close; ++i) {
+                const double ys = !g_scr_offs.empty() ? g_scr_offs[std::min(i, g_scr_offs.size()-1)] : 0.0;
+                const double ya = !g_acc_offs.empty() ? g_acc_offs[std::min(i, g_acc_offs.size()-1)] : ys;
+                const double y_center = 0.5 * (ys + ya);
+                if (y_center >= -eps) {
+                    close_pairs.emplace_back(ys, ya);
+                }
+            }
+            if (close_pairs.empty()) {
+                const double ys = g_scr_offs.empty() ? 0.0 : g_scr_offs.front();
+                const double ya = g_acc_offs.empty() ? ys : g_acc_offs.front();
+                close_pairs.emplace_back(ys, ya);
+            }
+
+            for (size_t ci = 0; ci < close_pairs.size(); ++ci) {
+                const double ylo = std::min(close_pairs[ci].first, close_pairs[ci].second);
+                const double yhi = std::max(close_pairs[ci].first, close_pairs[ci].second);
+                std::string close = add_suffix_before_ext(png, "_closeup");
+                if (ci > 0) {
+                    close = add_suffix_before_ext(png, "_closeup_p" + std::to_string(ci));
+                }
+                plot_closeup(ylo, yhi, close);
+                std::printf("wrote PNG (close-up%s): %s\n",
+                            use_pdb ? " + beam" : "", close.c_str());
+            }
+
+            // Ion number density grid (derived from scharge, undoing SCC scaling)
+            const int write_density_grid = envi("WRITE_DENSITY_GRID", use_pdb ? 1 : 0);
+            if (write_density_grid && use_pdb) {
+                MeshScalarField nion(geom);
+                const uint32_t nx = scharge.size(0);
+                const uint32_t ny = scharge.size(1);
+                const double x0_sc = SC_RAMP_START_M_META;
+                const double L_sc = SC_RAMP_LEN_M_META;
+                const double inv_L = (L_sc > 0.0) ? (1.0 / L_sc) : 0.0;
+                const double x_origin = scharge.origo(0);
+                const double hx = scharge.h();
+                const double q_C_plot = q_C;
+                const double inv_q = (q_C_plot > 0.0) ? (1.0 / q_C_plot) : 0.0;
+                const int norm_density = envi("DENSITY_NORM", 1);
+                const int log_density = envi("DENSITY_LOG10", 0);
+                const double dens_floor = envd("DENSITY_FLOOR", -1.0);
+                const double dens_floor_frac = envd("DENSITY_FLOOR_FRAC", 1.0e-6);
+                double max_nion = 0.0;
+
+                for (uint32_t i = 0; i < nx; ++i) {
+                    const double x = x_origin + hx * i;
+                    double f = 1.0;
+                    if (SC_FACTOR_META != 1.0 && x >= x0_sc) {
+                        if (L_sc > 0.0) {
+                            double t = (x - x0_sc) * inv_L;
+                            t = std::clamp(t, 0.0, 1.0);
+                            f = 1.0 + (SC_FACTOR_META - 1.0) * t;
+                        } else {
+                            f = SC_FACTOR_META;
+                        }
+                    }
+                    const double inv_f = (f != 0.0) ? (1.0 / f) : 0.0;
+                    for (uint32_t j = 0; j < ny; ++j) {
+                        const double rho = scharge(i, j);  // scaled charge density
+                        const double rho_raw = rho * inv_f;
+                        const double val = std::fabs(rho_raw) * inv_q;
+                        nion(i, j) = val;
+                        if (val > max_nion) max_nion = val;
+                    }
+                }
+                double floor_use = dens_floor;
+                if (log_density) {
+                    if (!(floor_use > 0.0) && max_nion > 0.0) {
+                        floor_use = max_nion * dens_floor_frac;
+                    }
+                    if (!(floor_use > 0.0)) floor_use = 1.0;
+                    double max_log = -std::numeric_limits<double>::infinity();
+                    for (uint32_t i = 0; i < nx; ++i) {
+                        for (uint32_t j = 0; j < ny; ++j) {
+                            const double v = std::max(nion(i, j), floor_use);
+                            const double lv = std::log10(v);
+                            nion(i, j) = lv;
+                            if (lv > max_log) max_log = lv;
+                        }
+                    }
+                    max_nion = std::isfinite(max_log) ? max_log : 0.0;
+                }
+                if (norm_density && max_nion > 0.0) {
+                    for (uint32_t i = 0; i < nx; ++i) {
+                        for (uint32_t j = 0; j < ny; ++j) {
+                            nion(i, j) /= max_nion;
+                        }
+                    }
+                }
+                std::printf("[density] max_nion=%g floor=%g (norm=%d log10=%d)\n",
+                            max_nion, floor_use, norm_density, log_density);
+
+                const char* gridname_c = std::getenv("DENSITY_GRID_NAME")
+                                             ? std::getenv("DENSITY_GRID_NAME")
+                                             : "ion_density_grid.dat";
+                const std::string gridpath = outdir + "/" + basename_only(gridname_c);
+                const int stride = std::max(1, envi("DENSITY_GRID_STRIDE", 1));
+                const double y_origin = scharge.origo(1);
+                std::ofstream gd(gridpath);
+                gd << "# ion_density_grid\n";
+                gd << "# nx " << nx << " ny " << ny << "\n";
+                gd << "# x0 " << std::setprecision(10) << x_origin
+                   << " y0 " << y_origin
+                   << " h " << hx
+                   << " stride " << stride << "\n";
+                gd << "# norm " << norm_density
+                   << " log10 " << log_density
+                   << " floor " << std::setprecision(10) << floor_use << "\n";
+                for (uint32_t j = 0; j < ny; j += stride) {
+                    for (uint32_t i = 0; i < nx; i += stride) {
+                        gd << std::setprecision(10) << nion(i, j);
+                        if (i + stride < nx) gd << " ";
+                    }
+                    gd << "\n";
+                }
+                std::printf("wrote density grid: %s\n", gridpath.c_str());
+            }
+        }
+
+        t_after_png = SteadyClock::now();
+
+    } else if (writepng) {
+    	const int FONT_PX = envi("PLOT_FONT_PX", 22);
+
+        // Geometry-only PNGs (no field solve)
+        GeomPlotter gp(geom);
+        gp.set_size(1600, 800);
+        gp.set_view(VIEW_XY, -1);
+	gp.set_font_size(FONT_PX);
+        gp.plot_png(png.c_str());
+        std::printf("wrote PNG: %s\n", png.c_str());
+
+        // Close-up (per beamlet pair when multiple apertures)
+        const double pad = envd("CLOSE_PAD_M", 5e-4);
+        double x0 = xs0 - pad;
+        double x1 = xa1 + pad;
+        double max_delta = 0.0;
+        for (const auto &grid : g_grids) {
+            max_delta = std::max(max_delta,
+                                 std::max(grid.chamfer.up_depth * grid.chamfer.up_slope,
+                                          grid.chamfer.dn_depth * grid.chamfer.dn_slope));
+        }
+
+        auto plot_closeup = [&](double ylo, double yhi, const std::string &outpath) {
+            const double y_center = 0.5 * (ylo + yhi);
+            const double y_span = std::max(std::fabs(ylo - y_center),
+                                           std::fabs(yhi - y_center));
+            double ymax_local = y_span + a_max + max_delta + pad;
+            double y0 = y_center - ymax_local, y1 = y_center + ymax_local;
+
+            const int   BASE = envi("CLOSE_BASE_PX", 800);
+            const double xr = x1 - x0, yr = y1 - y0;
+            const int   H = BASE;
+            const int   W = std::max(1, int(std::lround(BASE * (xr/yr))));
+
+            GeomPlotter gpc(geom);
+            gpc.set_view(VIEW_XY, -1);
+            gpc.set_ranges(x0, y0, x1, y1);
+            gpc.set_size(W, H);
+            gpc.set_font_size(FONT_PX);
+            gpc.plot_png(outpath.c_str());
+        };
+
+        std::vector<std::pair<double,double>> close_pairs;
+        const size_t n_close = std::max(g_scr_offs.size(), g_acc_offs.size());
+        close_pairs.reserve(n_close > 0 ? n_close : 1);
+        const double eps = 1.0e-12;
+        for (size_t i = 0; i < n_close; ++i) {
+            const double ys = !g_scr_offs.empty() ? g_scr_offs[std::min(i, g_scr_offs.size()-1)] : 0.0;
+            const double ya = !g_acc_offs.empty() ? g_acc_offs[std::min(i, g_acc_offs.size()-1)] : ys;
+            const double y_center = 0.5 * (ys + ya);
+            if (y_center >= -eps) {
+                close_pairs.emplace_back(ys, ya);
+            }
+        }
+        if (close_pairs.empty()) {
+            const double ys = g_scr_offs.empty() ? 0.0 : g_scr_offs.front();
+            const double ya = g_acc_offs.empty() ? ys : g_acc_offs.front();
+            close_pairs.emplace_back(ys, ya);
+        }
+
+        for (size_t ci = 0; ci < close_pairs.size(); ++ci) {
+            const double ylo = std::min(close_pairs[ci].first, close_pairs[ci].second);
+            const double yhi = std::max(close_pairs[ci].first, close_pairs[ci].second);
+            std::string close = add_suffix_before_ext(png, "_closeup");
+            if (ci > 0) {
+                close = add_suffix_before_ext(png, "_closeup_p" + std::to_string(ci));
+            }
+            plot_closeup(ylo, yhi, close);
+            std::printf("wrote PNG (close-up): %s\n", close.c_str());
+        }
+        t_after_png = SteadyClock::now();
+    }
+
+
+
+
+// --- write timing.json (safe string literals) ---
+try {
+    t_end = SteadyClock::now();
+    std::ofstream tj(outdir + "/timing.json");
+    tj << "{\n";
+    tj << "  \"wall_total_s\": "  << std::setprecision(10) << sec_since(t_start, t_end) << ",\n";
+    tj << "  \"mesh_build_s\": "  << std::setprecision(10) << sec_since(t_start, t_after_mesh) << ",\n";
+    tj << "  \"solve_block_s\": " << std::setprecision(10) << sec_since(t_after_mesh, t_after_solve) << ",\n";
+    tj << "  \"diagnostics_s\": " << std::setprecision(10) << sec_since(t_after_solve, t_after_diag) << ",\n";
+    tj << "  \"png_s\": "        << std::setprecision(10) << sec_since(t_after_diag, t_after_png) << "\n";
+    tj << "}\n";
+} catch (...) {
+    // don't fail the run if timing write fails
+}
+
+
+    return 0;
+}
+
+catch (Error &e) {
+    e.print_error_message(std::cerr, true);
+    return 1;
+}
