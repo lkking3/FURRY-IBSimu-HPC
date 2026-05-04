@@ -1,0 +1,36 @@
+# ── Simulation outputs ────────────────────────────────────────────────────────
+results/
+*.log
+*.out
+*.err
+
+# ── Compiled binaries ─────────────────────────────────────────────────────────
+sim/two_grid_2d
+sim/multi_grid_2d
+sim/multi_grid_2d_curved
+*.o
+
+# ── Generated HTML plots ──────────────────────────────────────────────────────
+*.html
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# ── Claude Code ───────────────────────────────────────────────────────────────
+.claude/
+
+# ── Graphify (generated knowledge graph) ─────────────────────────────────────
+graphify-out/
+.graphify_*
+
+# ── Paper writing ─────────────────────────────────────────────────────────────
+Paper Writing/
+
+# ── OS noise ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db

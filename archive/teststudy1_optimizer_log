@@ -1,0 +1,28 @@
+{
+  "csv_path": "results\\runlog_compact_Aprad_offset.csv",
+  "records": [
+    {
+      "iteration_id": 1,
+      "timestamp": "2026-03-30T10:40:22",
+      "ap_rad_m": 0.0015,
+      "gap_m": 0.002,
+      "proposed_offsets_m": [
+        0.0,
+        5.4422366e-05,
+        0.000107701291,
+        0.000161059672,
+        0.000214570549,
+        0.000268168632,
+        0.000321834703,
+        0.000378442268,
+        0.000444618349,
+        0.00045
+      ],
+      "slurm_sweep_path": "results\\optimizer_sweep.slurm",
+      "ingested_run_dirs": [],
+      "surrogate_r2": 0.9999947399669787,
+      "uncertainty_mean_deg": 0.003438282279221469,
+      "layout_score": 16.0
+    }
+  ]
+}
