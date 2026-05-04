@@ -49,19 +49,29 @@ PIPELINE_SCRIPT="$PIPELINE_DIR/curved_grid_pipeline.py"
 BINARY="${SWEEP_BINARY:-$SIM_DIR/multi_grid_2d_curved}"
 REDUCE="${REDUCE_SCRIPT:-$TOOLS_DIR/reduce_best.py}"
 
+# Derive manifest path from config name: <stem>_manifest.json in the same directory.
+# Convention matches curved_grid_pipeline.py --sweep output.
+# Can be overridden by passing SWEEP_MANIFEST explicitly in --export.
+if [[ -z "$SWEEP_MANIFEST" ]]; then
+    _cfg_stem="$(basename "${SWEEP_CONFIG}" .py)"
+    SWEEP_MANIFEST="$PIPELINE_DIR/${_cfg_stem}_manifest.json"
+fi
+
+# Resolve SWEEP_CONFIG to an absolute path if it isn't already
+if [[ "$SWEEP_CONFIG" != /* ]]; then
+    SWEEP_CONFIG="$PIPELINE_DIR/$SWEEP_CONFIG"
+fi
+
 # ---------------------------------------------------------------------------
 # Validate required inputs
 # ---------------------------------------------------------------------------
-if [[ -z "$SWEEP_MANIFEST" ]]; then
-    echo "ERROR: SWEEP_MANIFEST is not set." >&2
-    exit 1
-fi
 if [[ -z "$SWEEP_CONFIG" ]]; then
     echo "ERROR: SWEEP_CONFIG is not set." >&2
     exit 1
 fi
 if [[ ! -f "$SWEEP_MANIFEST" ]]; then
-    echo "ERROR: SWEEP_MANIFEST not found: $SWEEP_MANIFEST" >&2
+    echo "ERROR: Manifest not found: $SWEEP_MANIFEST" >&2
+    echo "       Run first:  python curved_grid_pipeline.py --sweep --config $SWEEP_CONFIG" >&2
     exit 1
 fi
 if [[ ! -f "$SWEEP_CONFIG" ]]; then

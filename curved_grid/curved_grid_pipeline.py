@@ -1850,12 +1850,14 @@ def run_sweep(
         ],
     }
 
-    manifest_path = pipeline_dir / "sweep_manifest.json"
+    # Manifest lives alongside the config: <stem>_manifest.json
+    # This matches the SLURM script's derivation: ${SWEEP_CONFIG%.py}_manifest.json
+    manifest_path = config_path.with_name(config_path.stem + "_manifest.json")
     manifest_path.write_text(
         json.dumps(manifest, indent=2), encoding="utf-8"
     )
     print(
-        f"[sweep] wrote manifest with {n_runs} runs → {manifest_path}",
+        f"[sweep] wrote manifest with {n_runs} runs → {manifest_path.name}",
         flush=True,
     )
 
@@ -1868,18 +1870,16 @@ def run_sweep(
         )
     print(f"[sweep] total runs: {n_runs}", flush=True)
 
-    slurm_script = pipeline_dir / "orchestrate_curved_grid_sweep.slurm"
+    # Use relative paths — submit from pipeline_dir so the SLURM script and
+    # config are referenced by filename only, binary by ../sim/ relative path.
     sbatch_cmd = [
         "sbatch",
         f"--array=0-{n_runs - 1}",
-        "--export=ALL,"
-        f"SWEEP_MANIFEST={manifest_path},"
-        f"SWEEP_CONFIG={config_path},"
-        f"SWEEP_BINARY={binary_path}",
-        str(slurm_script),
+        f"--export=SWEEP_CONFIG={config_path.name},SWEEP_BINARY=../sim/{binary_path.name}",
+        "orchestrate_curved_grid_sweep.slurm",
     ]
     print(f"[sweep] submitting: {' '.join(sbatch_cmd)}", flush=True)
-    result = subprocess.run(sbatch_cmd, capture_output=True, text=True)
+    result = subprocess.run(sbatch_cmd, capture_output=True, text=True, cwd=pipeline_dir)
     if result.returncode != 0:
         print(f"[sweep] sbatch error:\n{result.stderr}", flush=True)
         return result.returncode

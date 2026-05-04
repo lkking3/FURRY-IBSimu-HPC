@@ -1226,19 +1226,30 @@ class App(tk.Tk):
 
     # (key, default, description)
     _ENV_DEFS = [
+        # ── Run config (not sweep targets) ───────────────────────────────
         ("RUN_SOLVE",      "1",                    "Run Poisson/PIC solve (0 = geometry only)"),
         ("WRITE_PNG",      "1",                    "Write PNG outputs"),
         ("PNG_NAME",       "curved_grid_geom.png", "Geometry PNG filename"),
         ("RESULTS_DIR",    "results",              "Output directory name"),
         ("RUN_PREFIX",     "curved_grid_test",     "Run folder prefix"),
         ("ENABLE_IONS",    "1",                    "Enable ion particle tracing"),
+        # ── Domain geometry ───────────────────────────────────────────────
         ("X_RIGHT_M",      "0.025",                "Right boundary of close-up view (m)"),
         ("X_RIGHT_PHYS_M", "0.55",                 "Physical right boundary / tube length (m)"),
         ("YBOX_M",         "0.090",                "Half-height of simulation box (m)"),
         ("TUBE_WALL_T_M",  "0.0002",               "Drift tube wall thickness (m)"),
+        # ── Physics / solver ─────────────────────────────────────────────
         ("H",              "0.0001",               "Mesh cell size (m)"),
+        ("ION_N",          "1e16",                 "Ion number density (m^-3)"),
         ("SC_FACTOR",      "0.0005",               "Space-charge compensation factor"),
     ]
+
+    # Env vars that are run-config knobs, not physics — excluded from the
+    # sweep axis dropdown (still editable in the Simulation Inputs tab).
+    _SWEEP_ENV_EXCLUDE = frozenset({
+        "RUN_SOLVE", "WRITE_PNG", "PNG_NAME",
+        "RESULTS_DIR", "RUN_PREFIX", "ENABLE_IONS",
+    })
 
     # ------------------------------------------------------------------
     # Curved Grid tab — builder
@@ -1823,8 +1834,10 @@ class App(tk.Tk):
     # ── All parameter names the sweep axis dialog offers ────────────────
     @property
     def _all_sweep_param_names(self) -> list:
+        # All geometry params are valid sweep targets
         geom = [k for k, *_ in self._GEOM_DEFS]
-        env  = [k for k, *_ in self._ENV_DEFS]
+        # Physics / domain env vars only — exclude run-config knobs
+        env  = [k for k, *_ in self._ENV_DEFS if k not in self._SWEEP_ENV_EXCLUDE]
         return geom + env + ["custom…"]
 
     def _sweep_axis_dialog(self, existing: "SweepAxis | None" = None) -> "SweepAxis | None":
@@ -2080,14 +2093,13 @@ class App(tk.Tk):
             _gui_dir / "orchestrate_curved_grid_sweep.slurm",
         ]
         slurm_path = next((p for p in slurm_candidates if p.exists()), None)
-        slurm_hint = str(slurm_path) if slurm_path else "curved_grid/orchestrate_curved_grid_sweep.slurm"
+        slurm_name = slurm_path.name if slurm_path else "orchestrate_curved_grid_sweep.slurm"
 
         sbatch_cmd = (
             f"sbatch \\\n"
             f"  --array=0-{spec.total - 1} \\\n"
-            f"  --export=SWEEP_CONFIG={out_path},\\\n"
-            f"           SWEEP_BINARY=../sim/multi_grid_2d_curved \\\n"
-            f"  {slurm_hint}"
+            f"  --export=SWEEP_CONFIG={out_path.name},SWEEP_BINARY=../sim/multi_grid_2d_curved \\\n"
+            f"  {slurm_name}"
         )
 
         msg = (
