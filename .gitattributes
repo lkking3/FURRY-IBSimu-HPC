@@ -1,0 +1,15 @@
+# Default: normalize to LF on commit, check out as-is
+* text=auto
+
+# Always LF — these run on Linux HPC nodes
+*.sh    text eol=lf
+*.slurm text eol=lf
+*.py    text eol=lf
+*.cpp   text eol=lf
+*.md    text eol=lf
+Makefile text eol=lf
+
+# Binaries — no line-ending conversion
+*.png   binary
+*.jpg   binary
+*.pdf   binary

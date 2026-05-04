@@ -58,6 +58,33 @@ if _find_curved_pipeline():
         _HAS_CURVED = False
 
 
+def _find_sim_dir() -> bool:
+    """Add the sim/ directory alongside the repo root to sys.path so
+    sweep_types (and grid_types) can be imported by the GUI."""
+    import sys
+    _THIS_DIR = Path(__file__).resolve().parent
+    _CANDIDATES = [
+        _THIS_DIR.parent / "sim",
+        _THIS_DIR / "sim",
+        _THIS_DIR,
+    ]
+    for d in _CANDIDATES:
+        if (d / "sweep_types.py").exists():
+            p = str(d)
+            if p not in sys.path:
+                sys.path.insert(0, p)
+            return True
+    return False
+
+_HAS_SWEEP = False
+if _find_sim_dir():
+    try:
+        from sweep_types import SweepAxis, SweepSpec, linspace, arange
+        _HAS_SWEEP = True
+    except Exception:
+        _HAS_SWEEP = False
+
+
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -118,6 +145,11 @@ class App(tk.Tk):
         self.ap_offsets_label_var = tk.StringVar(value="Not applied — using loaded case.")
         self._aperture_offsets_override = None  # List[float] or None
         self._steering_arcs_override = None     # List[float] or None
+        # Parameter sweep state
+        self._sweep_axes: list = []             # List[SweepAxis]
+        self._sweep_mode_var  = tk.StringVar(value="product")
+        self._sweep_reduce_var = tk.BooleanVar(value=False)
+        self._sweep_tag_var   = tk.StringVar(value="sweep")
 
     def _set_defaults(self) -> None:
         self.csv_var.set(str(Path("results") / "runlog_compact_Aprad_offset.csv"))
@@ -1347,6 +1379,9 @@ class App(tk.Tk):
         self.bc_tree.tag_configure("fail", foreground="#c0392b")
         self.bc_tree.tag_configure("pass", foreground="#2e8b57")
 
+        # ── Tab 4 : Parameter Sweep ─────────────────────────────────────────
+        self._build_sweep_tab(sub_nb)
+
         # ── Action buttons ──────────────────────────────────────────────────
         act_frm = ttk.Frame(ctab, padding=(0, 2, 0, 0))
         act_frm.grid(row=2, column=0, sticky="ew")
@@ -1700,6 +1735,399 @@ class App(tk.Tk):
         """Kept as a thin alias for Save As (dialog replaced by inline fields)."""
         self._save_curved_case_as()
 
+    # ------------------------------------------------------------------
+    # Parameter Sweep tab
+    # ------------------------------------------------------------------
+
+    def _build_sweep_tab(self, sub_nb: ttk.Notebook) -> None:
+        sw_tab = ttk.Frame(sub_nb, padding=8)
+        sw_tab.columnconfigure(0, weight=1)
+        sub_nb.add(sw_tab, text="Parameter Sweep")
+
+        if not _HAS_SWEEP:
+            ttk.Label(
+                sw_tab,
+                text="sweep_types.py not found in sim/.\n"
+                     "Place sim/sweep_types.py in the repository and restart.",
+                foreground="red",
+            ).grid(row=0, column=0, sticky="w")
+            return
+
+        # ── Axis list ───────────────────────────────────────────────────
+        axes_frm = ttk.LabelFrame(sw_tab, text="Sweep Axes", padding=6)
+        axes_frm.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
+        axes_frm.columnconfigure(0, weight=1)
+        axes_frm.rowconfigure(0, weight=1)
+        sw_tab.rowconfigure(0, weight=1)
+
+        ax_cols = ["Parameter", "Values", "Count"]
+        self._sweep_tree = ttk.Treeview(
+            axes_frm, columns=ax_cols, show="headings", height=6, selectmode="browse")
+        self._sweep_tree.heading("Parameter", text="Parameter")
+        self._sweep_tree.heading("Values",    text="Values")
+        self._sweep_tree.heading("Count",     text="N")
+        self._sweep_tree.column("Parameter", width=160, anchor="w")
+        self._sweep_tree.column("Values",    width=380, anchor="w")
+        self._sweep_tree.column("Count",     width=42,  anchor="center")
+        self._sweep_tree.grid(row=0, column=0, sticky="nsew")
+        ax_vsb = ttk.Scrollbar(axes_frm, orient="vertical", command=self._sweep_tree.yview)
+        self._sweep_tree.configure(yscrollcommand=ax_vsb.set)
+        ax_vsb.grid(row=0, column=1, sticky="ns")
+
+        ax_btns = ttk.Frame(axes_frm)
+        ax_btns.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Button(ax_btns, text="Add Axis…",    command=self._sweep_add_axis).grid(row=0, column=0, padx=(0, 4))
+        ttk.Button(ax_btns, text="Edit…",        command=self._sweep_edit_axis).grid(row=0, column=1, padx=(0, 4))
+        ttk.Button(ax_btns, text="Remove Axis",  command=self._sweep_remove_axis).grid(row=0, column=2)
+
+        # ── Mode + options ──────────────────────────────────────────────
+        opt_frm = ttk.LabelFrame(sw_tab, text="Sweep Options", padding=6)
+        opt_frm.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        opt_frm.columnconfigure(3, weight=1)
+
+        ttk.Label(opt_frm, text="Mode:").grid(row=0, column=0, sticky="w", padx=(0, 4))
+        ttk.Radiobutton(opt_frm, text="Product  (Cartesian)",
+                        variable=self._sweep_mode_var, value="product",
+                        command=self._sweep_update_total).grid(row=0, column=1, sticky="w")
+        ttk.Radiobutton(opt_frm, text="Zip  (element-wise)",
+                        variable=self._sweep_mode_var, value="zip",
+                        command=self._sweep_update_total).grid(row=0, column=2, sticky="w", padx=(12, 0))
+
+        ttk.Label(opt_frm, text="Tag:").grid(row=1, column=0, sticky="w", pady=(6, 0), padx=(0, 4))
+        ttk.Entry(opt_frm, textvariable=self._sweep_tag_var, width=22).grid(
+            row=1, column=1, columnspan=2, sticky="w", pady=(6, 0))
+
+        ttk.Checkbutton(opt_frm, text="Run reduce_best after all tasks finish",
+                        variable=self._sweep_reduce_var).grid(
+            row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
+        self._sweep_total_var = tk.StringVar(value="Total combinations: —")
+        ttk.Label(opt_frm, textvariable=self._sweep_total_var,
+                  foreground="#0055cc").grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
+        # ── Generate ────────────────────────────────────────────────────
+        gen_frm = ttk.Frame(sw_tab, padding=(0, 2, 0, 0))
+        gen_frm.grid(row=2, column=0, sticky="ew")
+        gen_frm.columnconfigure(2, weight=1)
+
+        ttk.Button(gen_frm, text="Generate Sweep Case File…",
+                   command=self._sweep_generate).grid(row=0, column=0, padx=(0, 8))
+        ttk.Button(gen_frm, text="Clear All Axes",
+                   command=self._sweep_clear).grid(row=0, column=1)
+
+        self._sweep_status_var = tk.StringVar(value="")
+        ttk.Label(gen_frm, textvariable=self._sweep_status_var,
+                  foreground="#555555", wraplength=680, justify="left").grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+    # ── All parameter names the sweep axis dialog offers ────────────────
+    @property
+    def _all_sweep_param_names(self) -> list:
+        geom = [k for k, *_ in self._GEOM_DEFS]
+        env  = [k for k, *_ in self._ENV_DEFS]
+        return geom + env + ["custom…"]
+
+    def _sweep_axis_dialog(self, existing: "SweepAxis | None" = None) -> "SweepAxis | None":
+        """Modal dialog for adding or editing one SweepAxis.
+        Returns the new SweepAxis, or None if cancelled.
+        """
+        dlg = tk.Toplevel(self)
+        dlg.title("Add Sweep Axis" if existing is None else "Edit Sweep Axis")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        param_var  = tk.StringVar(value=existing.name if existing else "AP_RAD")
+        custom_var = tk.StringVar(value="" if existing is None or existing.name in self._all_sweep_param_names else existing.name)
+        values_var = tk.StringVar()
+        result: list = [None]   # mutable container so inner func can write it
+
+        # Pre-fill values string from existing axis
+        if existing is not None:
+            vals = existing.values
+            if len(vals) <= 20:
+                values_var.set(", ".join(str(v) for v in vals))
+            else:
+                values_var.set(", ".join(str(v) for v in vals))
+
+        frm = ttk.Frame(dlg, padding=14)
+        frm.grid()
+        frm.columnconfigure(1, weight=1)
+
+        row = 0
+        ttk.Label(frm, text="Parameter:").grid(row=row, column=0, sticky="w", padx=(0, 8))
+        param_cb = ttk.Combobox(frm, textvariable=param_var,
+                                values=self._all_sweep_param_names,
+                                state="readonly", width=28)
+        param_cb.grid(row=row, column=1, sticky="ew")
+        row += 1
+
+        custom_lbl = ttk.Label(frm, text="Custom name:")
+        custom_ent = ttk.Entry(frm, textvariable=custom_var, width=28)
+
+        def _on_param_change(*_):
+            if param_var.get() == "custom…":
+                custom_lbl.grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(4, 0))
+                custom_ent.grid(row=1, column=1, sticky="ew", pady=(4, 0))
+            else:
+                custom_lbl.grid_remove()
+                custom_ent.grid_remove()
+        param_cb.bind("<<ComboboxSelected>>", _on_param_change)
+        _on_param_change()
+
+        row = 2
+        ttk.Label(frm, text="Values:").grid(row=row, column=0, sticky="nw", padx=(0, 8), pady=(8, 0))
+        ttk.Entry(frm, textvariable=values_var, width=48).grid(
+            row=row, column=1, sticky="ew", pady=(8, 0))
+        row += 1
+
+        ttk.Label(
+            frm,
+            text=(
+                "Examples:\n"
+                "  Comma list:        0.001, 0.0015, 0.002\n"
+                "  linspace(a, b, n): linspace(1e16, 5e16, 5)\n"
+                "  arange(a, b, s):   arange(0.001, 0.003, 0.0005)"
+            ),
+            foreground="#666666", justify="left",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(2, 8))
+        row += 1
+
+        def _parse_values(s: str) -> list:
+            s = s.strip()
+            if s.startswith("linspace("):
+                inner = s[len("linspace("):-1]
+                a, b, n = [x.strip() for x in inner.split(",")]
+                return linspace(float(a), float(b), int(n))
+            if s.startswith("arange("):
+                inner = s[len("arange("):-1]
+                a, b, step = [x.strip() for x in inner.split(",")]
+                return arange(float(a), float(b), float(step))
+            # plain comma-separated
+            return [float(x.strip()) for x in s.split(",") if x.strip()]
+
+        def do_ok():
+            pname = param_var.get()
+            if pname == "custom…":
+                pname = custom_var.get().strip()
+                if not pname:
+                    messagebox.showerror("Sweep Axis", "Enter a custom parameter name.", parent=dlg)
+                    return
+            try:
+                vals = _parse_values(values_var.get())
+                if not vals:
+                    raise ValueError("No values parsed — check your input.")
+            except Exception as exc:
+                messagebox.showerror("Sweep Axis", f"Could not parse values:\n{exc}", parent=dlg)
+                return
+            result[0] = SweepAxis(name=pname, values=vals)
+            dlg.destroy()
+
+        ttk.Button(frm, text="OK",     command=do_ok).grid(row=row, column=0, pady=(4, 0))
+        ttk.Button(frm, text="Cancel", command=dlg.destroy).grid(row=row, column=1, sticky="w", pady=(4, 0))
+
+        dlg.wait_window()
+        return result[0]
+
+    def _sweep_add_axis(self) -> None:
+        ax = self._sweep_axis_dialog()
+        if ax is None:
+            return
+        self._sweep_axes.append(ax)
+        self._sweep_tree_refresh()
+        self._sweep_update_total()
+
+    def _sweep_edit_axis(self) -> None:
+        sel = self._sweep_tree.selection()
+        if not sel:
+            messagebox.showinfo("Parameter Sweep", "Select an axis to edit.")
+            return
+        idx = self._sweep_tree.index(sel[0])
+        existing = self._sweep_axes[idx]
+        ax = self._sweep_axis_dialog(existing=existing)
+        if ax is None:
+            return
+        self._sweep_axes[idx] = ax
+        self._sweep_tree_refresh()
+        self._sweep_update_total()
+
+    def _sweep_remove_axis(self) -> None:
+        sel = self._sweep_tree.selection()
+        if not sel:
+            messagebox.showinfo("Parameter Sweep", "Select an axis to remove.")
+            return
+        idx = self._sweep_tree.index(sel[0])
+        del self._sweep_axes[idx]
+        self._sweep_tree_refresh()
+        self._sweep_update_total()
+
+    def _sweep_clear(self) -> None:
+        self._sweep_axes.clear()
+        self._sweep_tree_refresh()
+        self._sweep_update_total()
+
+    def _sweep_tree_refresh(self) -> None:
+        for item in self._sweep_tree.get_children():
+            self._sweep_tree.delete(item)
+        for ax in self._sweep_axes:
+            vals = ax.values
+            if len(vals) <= 6:
+                val_str = ", ".join(str(v) for v in vals)
+            else:
+                val_str = (
+                    f"{vals[0]}, {vals[1]}, … {vals[-2]}, {vals[-1]}"
+                    f"  ({len(vals)} values)"
+                )
+            self._sweep_tree.insert("", tk.END, values=(ax.name, val_str, len(vals)))
+
+    def _sweep_update_total(self) -> None:
+        if not self._sweep_axes:
+            self._sweep_total_var.set("Total combinations: —")
+            return
+        try:
+            spec = SweepSpec(
+                axes=self._sweep_axes,
+                mode=self._sweep_mode_var.get(),
+                reduce=self._sweep_reduce_var.get(),
+                tag=self._sweep_tag_var.get(),
+            )
+            n = spec.total
+            self._sweep_total_var.set(f"Total combinations: {n}  →  SLURM --array=0-{n - 1}")
+        except Exception as exc:
+            self._sweep_total_var.set(f"⚠  {exc}")
+
+    def _sweep_generate(self) -> None:
+        """Write a sweep-enabled case file and print the sbatch command."""
+        if not _HAS_SWEEP:
+            messagebox.showinfo("Parameter Sweep", "sweep_types not available.")
+            return
+        if not self._sweep_axes:
+            messagebox.showinfo("Parameter Sweep", "Add at least one sweep axis first.")
+            return
+
+        # Need a case file to wrap
+        case_path_str = self.curved_case_var.get().strip()
+        if not case_path_str:
+            messagebox.showinfo("Parameter Sweep",
+                                "Load a Curved Grid case file first (use Browse / Load Case).")
+            return
+
+        # Ask where to save the sweep case file
+        out_path_str = filedialog.asksaveasfilename(
+            defaultextension=".py",
+            initialfile=Path(case_path_str).stem + "_sweep.py",
+            initialdir=str(Path(case_path_str).parent),
+            filetypes=[("Python", "*.py"), ("All Files", "*.*")],
+            title="Save sweep case file as…",
+        )
+        if not out_path_str:
+            return
+
+        try:
+            spec = SweepSpec(
+                axes=self._sweep_axes,
+                mode=self._sweep_mode_var.get(),
+                reduce=self._sweep_reduce_var.get(),
+                tag=self._sweep_tag_var.get(),
+            )
+        except Exception as exc:
+            messagebox.showerror("Sweep Error", str(exc))
+            return
+
+        # Import write_sweep_case_file from the pipeline
+        try:
+            from curved_grid_pipeline import write_sweep_case_file  # type: ignore
+        except ImportError:
+            messagebox.showerror(
+                "Sweep Error",
+                "curved_grid_pipeline does not export write_sweep_case_file.\n"
+                "Ensure the pipeline has been updated with sweep support.",
+            )
+            return
+
+        # Gather current geometry / env overrides from the GUI fields so the
+        # generated sweep file has the most up-to-date base values.
+        gui_overrides: dict = {}
+        if hasattr(self, "curved_geom_vars"):
+            for k, var in self.curved_geom_vars.items():
+                v = var.get().strip()
+                if v:
+                    gui_overrides[k] = v
+        if hasattr(self, "curved_env_vars"):
+            for k, var in self.curved_env_vars.items():
+                v = var.get().strip()
+                if v:
+                    gui_overrides[k] = v
+
+        try:
+            out_path = Path(out_path_str)
+            write_sweep_case_file(
+                out_path,
+                sweep_axes=spec.axes,
+                sweep_mode=spec.mode,
+                sweep_reduce=spec.reduce,
+                sweep_tag=spec.tag,
+                source_case_path=Path(case_path_str),
+                gui_overrides=gui_overrides,
+            )
+        except Exception as exc:
+            messagebox.showerror("Sweep Error", f"{exc}\n\n{traceback.format_exc()}")
+            return
+
+        # Locate the sweep SLURM script
+        _gui_dir = Path(__file__).resolve().parent
+        slurm_candidates = [
+            _gui_dir.parent / "curved_grid" / "orchestrate_curved_grid_sweep.slurm",
+            _gui_dir / "orchestrate_curved_grid_sweep.slurm",
+        ]
+        slurm_path = next((p for p in slurm_candidates if p.exists()), None)
+        slurm_hint = str(slurm_path) if slurm_path else "curved_grid/orchestrate_curved_grid_sweep.slurm"
+
+        sbatch_cmd = (
+            f"sbatch \\\n"
+            f"  --array=0-{spec.total - 1} \\\n"
+            f"  --export=SWEEP_CONFIG={out_path},\\\n"
+            f"           SWEEP_BINARY=../sim/multi_grid_2d_curved \\\n"
+            f"  {slurm_hint}"
+        )
+
+        msg = (
+            f"Sweep case file written:\n  {out_path}\n\n"
+            f"Run on HPC (from curved_grid/):\n\n{sbatch_cmd}\n\n"
+            f"Total tasks: {spec.total}  |  Mode: {spec.mode}  |  Reduce: {spec.reduce}"
+        )
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Sweep Generated")
+        dlg.resizable(True, True)
+        dlg.grab_set()
+        frm = ttk.Frame(dlg, padding=14)
+        frm.grid(sticky="nsew")
+        dlg.columnconfigure(0, weight=1)
+        dlg.rowconfigure(0, weight=1)
+        frm.columnconfigure(0, weight=1)
+        frm.rowconfigure(0, weight=1)
+        txt = tk.Text(frm, wrap="word", width=72, height=16,
+                      font=("Consolas", 9), background="#f8f8f8")
+        txt.insert("1.0", msg)
+        txt.configure(state="disabled")
+        txt.grid(row=0, column=0, sticky="nsew")
+        vsb2 = ttk.Scrollbar(frm, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=vsb2.set)
+        vsb2.grid(row=0, column=1, sticky="ns")
+
+        def _copy():
+            self.clipboard_clear()
+            self.clipboard_append(sbatch_cmd)
+            self.update()
+
+        btn_frm = ttk.Frame(frm)
+        btn_frm.grid(row=1, column=0, columnspan=2, pady=(8, 0), sticky="w")
+        ttk.Button(btn_frm, text="Copy sbatch command", command=_copy).grid(row=0, column=0, padx=(0, 8))
+        ttk.Button(btn_frm, text="Close", command=dlg.destroy).grid(row=0, column=1)
+
+        self._sweep_status_var.set(
+            f"Wrote {out_path.name}  ({spec.total} tasks, mode={spec.mode})"
+        )
 
 
 def main() -> int:

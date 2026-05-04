@@ -73,6 +73,12 @@ from grid_types import (
     serialize_grid_stack,
 )
 
+try:
+    from sweep_types import SweepAxis, SweepSpec, linspace, arange
+    _HAS_SWEEP = True
+except ImportError:
+    _HAS_SWEEP = False
+
 
 # ---------------------------------------------------------------------------
 # Convenience: beamlet pair builder
@@ -1386,6 +1392,613 @@ def plot_curved_grid_profile(
 
 
 # ---------------------------------------------------------------------------
+# Parameter sweep support
+# ---------------------------------------------------------------------------
+
+def load_sweep_spec(config_path: Path):
+    """Execute a sweep config file and return ``(make_case_fn, sweep_spec)``.
+
+    The config file must define:
+
+    * ``make_case(**overrides)`` — a callable that accepts keyword overrides for
+      any of the module-level constants and returns a
+      :class:`CurvedSimulationCase`.
+    * ``SWEEP`` — a :class:`SweepSpec` instance that describes the axes and
+      reduction strategy.
+
+    The execution namespace is populated with all curved-grid types *plus*
+    the sweep helpers so that the config file can reference them without an
+    explicit import.
+
+    Parameters
+    ----------
+    config_path:
+        Path to the ``.py`` sweep config file.
+
+    Returns
+    -------
+    tuple[callable, SweepSpec]
+        ``(make_case_fn, sweep_spec)``
+
+    Raises
+    ------
+    ImportError
+        If ``sweep_types`` could not be imported (``_HAS_SWEEP`` is False).
+    ValueError
+        If the config file does not define both ``make_case`` and ``SWEEP``.
+    """
+    if not _HAS_SWEEP:
+        raise ImportError(
+            "sweep_types is not available — ensure sim/sweep_types.py exists "
+            "and is importable."
+        )
+
+    namespace: Dict = {
+        # curved-grid types
+        "math": __import__("math"),
+        "Aperture": Aperture,
+        "Chamfer": Chamfer,
+        "GridDefinition": GridDefinition,
+        "SimulationCase": SimulationCase,
+        "BeamletPair": BeamletPair,
+        "make_apertures_from_pairs": make_apertures_from_pairs,
+        "concentric_accel_radius": concentric_accel_radius,
+        "concentric_accel_offsets": concentric_accel_offsets,
+        "GridCurvature": GridCurvature,
+        "CurvedGridDefinition": CurvedGridDefinition,
+        "CurvedSimulationCase": CurvedSimulationCase,
+        # sweep helpers
+        "SweepAxis": SweepAxis,
+        "SweepSpec": SweepSpec,
+        "linspace": linspace,
+        "arange": arange,
+    }
+    code = compile(
+        Path(config_path).read_text(encoding="utf-8"),
+        str(config_path),
+        "exec",
+    )
+    exec(code, namespace)
+
+    make_case_fn = namespace.get("make_case")
+    sweep_spec = namespace.get("SWEEP")
+    if make_case_fn is None:
+        raise ValueError(
+            f"{config_path} must define a callable 'make_case(**overrides)'."
+        )
+    if sweep_spec is None:
+        raise ValueError(
+            f"{config_path} must define 'SWEEP = SweepSpec(...)'."
+        )
+    return make_case_fn, sweep_spec
+
+
+def write_sweep_case_file(
+    path: Path,
+    *,
+    sweep_axes,                          # List[SweepAxis] or List[Tuple[str, str]]
+    sweep_mode: str = "product",
+    sweep_reduce: bool = False,
+    sweep_tag: str = "",
+    # Geometry — can be supplied directly or derived from source_case_path
+    source_case_path: Optional[Path] = None,
+    gui_overrides: Optional[Dict[str, str]] = None,
+    screen_offsets_m: Optional[List[float]] = None,
+    accel_offsets_m: Optional[List[float]] = None,
+    ap_radius_m: float = 0.0015,
+    R_scr_m: float = 0.100,
+    R_acc_m: Optional[float] = None,
+    screen_voltage_v: float = 0.0,
+    accel_voltage_v: float = -15000.0,
+    screen_thickness_m: float = 0.005,
+    accel_thickness_m: float = 0.005,
+    gap_after_m: float = 0.006,
+    env: Optional[Dict[str, str]] = None,
+) -> None:
+    """Write a parameterized curved-grid sweep case file (``.py``).
+
+    The generated file is valid Python that can be loaded by both
+    :func:`load_curved_case` (single run via ``CASE = make_case()``) and
+    :func:`load_sweep_spec` (parameter sweep via ``make_case`` + ``SWEEP``).
+
+    Layout of the generated file
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    1. Module-level constants (``R_SCR_M``, ``AP_RADIUS_M``, …).
+    2. ``def make_case(**overrides)`` — each constant is retrieved via
+       ``overrides.get("CONST_NAME", CONST_NAME)``, the aperture pairs are
+       recomputed, and a ``CurvedSimulationCase`` is returned.
+    3. ``CASE = make_case()`` for backward compatibility with
+       :func:`load_curved_case`.
+    4. ``from sweep_types import …`` and ``SWEEP = SweepSpec(…)`` block.
+
+    Parameters
+    ----------
+    path:
+        Output ``.py`` file path.
+    sweep_axes:
+        List of ``(param_name, values_repr)`` tuples.  *param_name* must match
+        one of the module-level constants (e.g. ``"R_SCR_M"``).
+        *values_repr* is the raw Python expression to embed verbatim in the
+        ``SweepAxis`` call (e.g. ``"[0.08, 0.10, 0.12]"`` or
+        ``"linspace(1e16, 5e16, 5)"``).
+    sweep_mode:
+        Passed to ``SweepSpec(mode=…)``.  Typical values: ``"grid"`` (full
+        Cartesian product), ``"zip"`` (paired iteration).
+    sweep_reduce:
+        Passed to ``SweepSpec(reduce=…)``.  When True the SLURM orchestrator
+        will submit a reduction job after the array completes.
+    screen_offsets_m, accel_offsets_m, ap_radius_m, R_scr_m, R_acc_m,
+    screen_voltage_v, accel_voltage_v, screen_thickness_m, accel_thickness_m,
+    gap_after_m, env:
+        Same semantics as :func:`write_case_file`.
+    """
+    import datetime as _dt
+
+    # ------------------------------------------------------------------
+    # Normalise sweep_axes: accept both List[SweepAxis] and List[Tuple]
+    # ------------------------------------------------------------------
+    _raw_axes = []
+    for ax in sweep_axes:
+        if hasattr(ax, "name") and hasattr(ax, "values"):
+            # SweepAxis object from sweep_types
+            _raw_axes.append((ax.name, repr(list(ax.values))))
+        else:
+            # Legacy (param_name, values_repr_string) tuple
+            _raw_axes.append(tuple(ax))
+    sweep_axes_tuples: List[Tuple[str, str]] = _raw_axes
+
+    # ------------------------------------------------------------------
+    # If a source case file is given, load geometry from it and apply
+    # any GUI overrides on top.
+    # ------------------------------------------------------------------
+    if source_case_path is not None:
+        _src = load_curved_case(source_case_path)
+        _g0  = _src.grids[0]
+        _g1  = _src.grids[1] if len(_src.grids) > 1 else None
+
+        # Base values from the loaded case
+        R_scr_m           = _g0.curvature.radius_m if not _g0.curvature.is_flat else float("inf")
+        screen_thickness_m = _g0.thickness_m
+        gap_after_m        = _g0.gap_after_m
+        screen_voltage_v   = _g0.voltage_v
+        accel_voltage_v    = _g1.voltage_v  if _g1 else accel_voltage_v
+        accel_thickness_m  = _g1.thickness_m if _g1 else accel_thickness_m
+
+        _bore_radii = [ap.radius_m for ap in _g0.apertures if ap.radius_m > 0]
+        ap_radius_m = _bore_radii[0] if _bore_radii else ap_radius_m
+
+        screen_offsets_m = sorted({abs(ap.offset_m) for ap in _g0.apertures})
+        accel_offsets_m  = None   # will be recomputed below
+        R_acc_m          = None
+
+        if env is None:
+            env = dict(_src.env)
+        else:
+            merged = dict(_src.env)
+            merged.update(env)
+            env = merged
+
+        # Apply GUI field overrides (string values from the editor)
+        _ov = gui_overrides or {}
+        _GEOM_KEYS_MM  = {"R_SCR", "T_SCR", "T_ACC", "GAP", "AP_RAD"}
+        _GEOM_KEY_MAP  = {
+            "R_SCR":  "R_scr_m",
+            "T_SCR":  "screen_thickness_m",
+            "T_ACC":  "accel_thickness_m",
+            "GAP":    "gap_after_m",
+            "VS":     "screen_voltage_v",
+            "VA":     "accel_voltage_v",
+            "AP_RAD": "ap_radius_m",
+        }
+        for gui_key, local_name in _GEOM_KEY_MAP.items():
+            if gui_key in _ov:
+                try:
+                    val_mm = float(_ov[gui_key])
+                    val_m  = val_mm * 1e-3 if gui_key in _GEOM_KEYS_MM else val_mm
+                    locals()[local_name]   # ensure name exists (suppress linter)
+                    # Assign into local scope via explicit reassignment
+                    if local_name == "R_scr_m":            R_scr_m            = val_m
+                    elif local_name == "screen_thickness_m": screen_thickness_m = val_m
+                    elif local_name == "accel_thickness_m":  accel_thickness_m  = val_m
+                    elif local_name == "gap_after_m":        gap_after_m        = val_m
+                    elif local_name == "screen_voltage_v":   screen_voltage_v   = val_m
+                    elif local_name == "accel_voltage_v":    accel_voltage_v    = val_m
+                    elif local_name == "ap_radius_m":        ap_radius_m        = val_m
+                except (ValueError, KeyError):
+                    pass
+        # ENV overrides from GUI
+        for gui_key in _ov:
+            if gui_key not in _GEOM_KEY_MAP:
+                if env is None:
+                    env = {}
+                env[gui_key] = _ov[gui_key]
+
+    if screen_offsets_m is None:
+        screen_offsets_m = [0.0]
+
+    if R_acc_m is None:
+        R_acc_m = concentric_accel_radius(
+            R_scr_m, screen_thickness_m, gap_after_m, screen_offsets_m
+        )
+
+    if accel_offsets_m is None:
+        accel_offsets_m = concentric_accel_offsets(
+            screen_offsets_m, R_scr_m, R_acc_m
+        )
+
+    # Convert absolute accel offsets to steering arc-lengths
+    steering_arcs_m: List[float] = []
+    for r_scr, r_acc in zip(screen_offsets_m, accel_offsets_m):
+        abs_r_scr = abs(r_scr)
+        abs_r_acc = abs(r_acc)
+        if math.isinf(R_scr_m) or math.isinf(R_acc_m):
+            scale = 1.0 if math.isinf(R_scr_m) else R_acc_m / R_scr_m
+            steering_arcs_m.append(r_acc - r_scr * scale)
+        else:
+            alpha_scr = math.asin(min(1.0, abs_r_scr / R_scr_m))
+            alpha_acc = math.asin(min(1.0, abs_r_acc / R_acc_m))
+            sign = 1.0 if r_scr >= 0.0 else -1.0
+            steering_arcs_m.append((alpha_acc - alpha_scr) * sign * R_acc_m)
+
+    def _fmt_list(vals: List[float]) -> str:
+        return "[" + ", ".join(f"{v:.8g}" for v in vals) + "]"
+
+    env_lines = ""
+    if env:
+        for k, v in sorted(env.items()):
+            try:
+                float(v)
+                env_lines += f'        "{k}": overrides.get("{k}", {v}),\n'
+            except (ValueError, TypeError):
+                env_lines += f'        "{k}": overrides.get("{k}", "{v}"),\n'
+
+    # Build the SWEEP block
+    axes_lines = ""
+    for param_name, values_repr in sweep_axes_tuples:
+        axes_lines += f'    SweepAxis(name="{param_name}", values={values_repr}),\n'
+
+    timestamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    filename = Path(path).name
+
+    content = (
+        f'"""\n'
+        f'Curved grid sweep case — generated by curved_grid_pipeline  [{timestamp}]\n'
+        f'\n'
+        f'Single run:  python curved_grid_pipeline.py --config {filename}\n'
+        f'Dry-run:     python curved_grid_pipeline.py --config {filename} --dry-run\n'
+        f'Sweep:       python curved_grid_pipeline.py --config {filename} --sweep\n'
+        f'Array task:  python curved_grid_pipeline.py --config {filename} \\\n'
+        f'                 --sweep-task $SLURM_ARRAY_TASK_ID\n'
+        f'"""\n'
+        f'import math\n'
+        f'from curved_grid_pipeline import (\n'
+        f'    Aperture, Chamfer, BeamletPair, GridCurvature,\n'
+        f'    CurvedGridDefinition, CurvedSimulationCase,\n'
+        f'    make_apertures_from_pairs,\n'
+        f'    concentric_accel_radius, concentric_accel_offsets,\n'
+        f')\n'
+        f'\n'
+        f'# ── Electrode geometry ──────────────────────────────────────────\n'
+        f'R_SCR_M         = {R_scr_m:.8g}   # screen radius of curvature (m)\n'
+        f'R_ACC_M         = {R_acc_m:.8g}   # accel  radius of curvature (m)  [concentric]\n'
+        f'SCREEN_T_M      = {screen_thickness_m:.8g}\n'
+        f'ACCEL_T_M       = {accel_thickness_m:.8g}\n'
+        f'GAP_AFTER_M     = {gap_after_m:.8g}\n'
+        f'VS_V            = {screen_voltage_v:.1f}\n'
+        f'VA_V            = {accel_voltage_v:.1f}\n'
+        f'AP_RADIUS_M     = {ap_radius_m:.8g}\n'
+        f'\n'
+        f'# ── Aperture offsets (m) ─────────────────────────────────────────\n'
+        f'SCREEN_OFFSETS_M = {_fmt_list(screen_offsets_m)}\n'
+        f'# Arc-length on the accel sphere from the concentric (zero-steering) position.\n'
+        f'STEERING_ARCS_M  = {_fmt_list(steering_arcs_m)}\n'
+        f'\n'
+        f'\n'
+        f'# ── Parameterised case factory ────────────────────────────────────\n'
+        f'def make_case(**overrides):\n'
+        f'    """Return a CurvedSimulationCase built from module constants.\n'
+        f'\n'
+        f'    Each constant is replaced by the corresponding value in *overrides*\n'
+        f'    when supplied, allowing the sweep runner to vary individual\n'
+        f'    parameters without mutating module state.\n'
+        f'    """\n'
+        f'    r_scr_m      = overrides.get("R_SCR_M",     R_SCR_M)\n'
+        f'    r_acc_m_base = overrides.get("R_ACC_M",     R_ACC_M)\n'
+        f'    screen_t_m   = overrides.get("SCREEN_T_M",  SCREEN_T_M)\n'
+        f'    accel_t_m    = overrides.get("ACCEL_T_M",   ACCEL_T_M)\n'
+        f'    gap_after_m  = overrides.get("GAP_AFTER_M", GAP_AFTER_M)\n'
+        f'    vs_v         = overrides.get("VS_V",         VS_V)\n'
+        f'    va_v         = overrides.get("VA_V",         VA_V)\n'
+        f'    ap_radius_m  = overrides.get("AP_RADIUS_M", AP_RADIUS_M)\n'
+        f'\n'
+        f'    # Re-derive R_ACC_M when R_SCR_M or geometry changes\n'
+        f'    if "R_ACC_M" not in overrides:\n'
+        f'        r_acc_m = concentric_accel_radius(\n'
+        f'            r_scr_m, screen_t_m, gap_after_m, SCREEN_OFFSETS_M\n'
+        f'        )\n'
+        f'    else:\n'
+        f'        r_acc_m = r_acc_m_base\n'
+        f'\n'
+        f'    pairs = [\n'
+        f'        BeamletPair(\n'
+        f'            screen_offset_m=s,\n'
+        f'            steering_arc_m=arc,\n'
+        f'            screen_radius_m=ap_radius_m,\n'
+        f'        )\n'
+        f'        for s, arc in zip(SCREEN_OFFSETS_M, STEERING_ARCS_M)\n'
+        f'    ]\n'
+        f'    screen_apertures, accel_apertures = make_apertures_from_pairs(\n'
+        f'        pairs, mirror=False, R_scr_m=r_scr_m, R_acc_m=r_acc_m\n'
+        f'    )\n'
+        f'\n'
+        f'    return CurvedSimulationCase(\n'
+        f'        grids=[\n'
+        f'            CurvedGridDefinition(\n'
+        f'                name="screen",\n'
+        f'                voltage_v=vs_v,\n'
+        f'                thickness_m=screen_t_m,\n'
+        f'                gap_after_m=gap_after_m,\n'
+        f'                apertures=screen_apertures,\n'
+        f'                curvature=GridCurvature(radius_m=r_scr_m, concave_upstream=True),\n'
+        f'                mirror=True,\n'
+        f'            ),\n'
+        f'            CurvedGridDefinition(\n'
+        f'                name="accel",\n'
+        f'                voltage_v=va_v,\n'
+        f'                thickness_m=accel_t_m,\n'
+        f'                gap_after_m=0.0,\n'
+        f'                apertures=accel_apertures,\n'
+        f'                curvature=GridCurvature(radius_m=r_acc_m, concave_upstream=True),\n'
+        f'                mirror=True,\n'
+        f'            ),\n'
+        f'        ],\n'
+        f'        env={{\n'
+        f'{env_lines}'
+        f'        }},\n'
+        f'    )\n'
+        f'\n'
+        f'\n'
+        f'# ── Backward-compatible single-run case ────────────────────────────\n'
+        f'CASE = make_case()\n'
+        f'\n'
+        f'\n'
+        f'# ── Sweep specification ──────────────────────────────────────────\n'
+        f'from sweep_types import SweepAxis, SweepSpec, linspace, arange  # noqa: E402\n'
+        f'\n'
+        f'SWEEP = SweepSpec(\n'
+        f'    axes=[\n'
+        f'{axes_lines}'
+        f'    ],\n'
+        f'    mode="{sweep_mode}",\n'
+        f'    reduce={sweep_reduce!r},\n'
+        f'    tag="{sweep_tag}",\n'
+        f')\n'
+    )
+    Path(path).write_text(content, encoding="utf-8")
+
+
+def run_sweep(
+    config_path: Path,
+    binary_path: Path,
+    pipeline_dir: Path,
+) -> int:
+    """Generate a sweep manifest and submit a SLURM array job.
+
+    Steps
+    ~~~~~
+    1. Load the sweep spec from *config_path* via :func:`load_sweep_spec`.
+    2. Expand all sweep axes into a flat list of parameter dicts.
+    3. Write ``sweep_manifest.json`` to *pipeline_dir*.
+    4. Submit the SLURM array via ``sbatch``.
+    5. If ``sweep_spec.reduce`` is True, submit a dependent reduction job.
+
+    Parameters
+    ----------
+    config_path:
+        Path to the ``.py`` sweep config file.
+    binary_path:
+        Path to the multi-grid solver binary that each array task will run.
+    pipeline_dir:
+        Directory containing ``orchestrate_curved_grid_sweep.slurm`` and
+        where ``sweep_manifest.json`` will be written.
+
+    Returns
+    -------
+    int
+        Exit code (0 = success).
+    """
+    import json
+    import itertools
+
+    make_case_fn, sweep_spec = load_sweep_spec(config_path)
+
+    # Expand axes into a list of parameter dicts.
+    # mode="grid" → Cartesian product; mode="zip" → paired iteration.
+    axes = sweep_spec.axes
+    if sweep_spec.mode == "zip":
+        combos = list(zip(*[ax.values for ax in axes]))
+        runs_params = [
+            {ax.name: val for ax, val in zip(axes, combo)}
+            for combo in combos
+        ]
+    else:
+        # Default: full Cartesian product
+        value_lists = [ax.values for ax in axes]
+        runs_params = [
+            {ax.name: val for ax, val in zip(axes, combo)}
+            for combo in itertools.product(*value_lists)
+        ]
+
+    n_runs = len(runs_params)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    manifest: Dict = {
+        "meta": {
+            "config": str(config_path),
+            "binary": str(binary_path),
+            "mode": sweep_spec.mode,
+            "reduce": sweep_spec.reduce,
+            "n_runs": n_runs,
+            "created": timestamp,
+        },
+        "runs": [
+            {
+                "idx": i,
+                "tag": f"sweep_{i:04d}",
+                "params": params,
+            }
+            for i, params in enumerate(runs_params)
+        ],
+    }
+
+    manifest_path = pipeline_dir / "sweep_manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
+    print(
+        f"[sweep] wrote manifest with {n_runs} runs → {manifest_path}",
+        flush=True,
+    )
+
+    # Print per-axis summary
+    for ax in axes:
+        print(
+            f"[sweep]   axis '{ax.name}': {len(ax.values)} values "
+            f"({ax.values[0]} … {ax.values[-1]})",
+            flush=True,
+        )
+    print(f"[sweep] total runs: {n_runs}", flush=True)
+
+    slurm_script = pipeline_dir / "orchestrate_curved_grid_sweep.slurm"
+    sbatch_cmd = [
+        "sbatch",
+        f"--array=0-{n_runs - 1}",
+        "--export=ALL,"
+        f"SWEEP_MANIFEST={manifest_path},"
+        f"SWEEP_CONFIG={config_path},"
+        f"SWEEP_BINARY={binary_path}",
+        str(slurm_script),
+    ]
+    print(f"[sweep] submitting: {' '.join(sbatch_cmd)}", flush=True)
+    result = subprocess.run(sbatch_cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"[sweep] sbatch error:\n{result.stderr}", flush=True)
+        return result.returncode
+
+    array_job_id = result.stdout.strip().split()[-1]
+    print(f"[sweep] submitted array job {array_job_id}", flush=True)
+
+    # Optionally submit a reduction job dependent on the array completing.
+    if sweep_spec.reduce:
+        reduce_script = pipeline_dir.parent / "tools" / "reduce_best.py"
+        if not reduce_script.exists():
+            # Fall back: search relative to pipeline_dir
+            reduce_script = pipeline_dir / "reduce_best.py"
+
+        if not reduce_script.exists():
+            print(
+                f"[sweep] WARNING: reduce_best.py not found — skipping "
+                f"reduction job submission.",
+                flush=True,
+            )
+        else:
+            dep_cmd = [
+                "sbatch",
+                f"--dependency=afterok:{array_job_id}",
+                "--export=ALL,"
+                f"SWEEP_MANIFEST={manifest_path}",
+                "--wrap",
+                f"python {reduce_script} --manifest {manifest_path}",
+            ]
+            print(
+                f"[sweep] submitting reduction job (dep=afterok:{array_job_id})",
+                flush=True,
+            )
+            dep_result = subprocess.run(dep_cmd, capture_output=True, text=True)
+            if dep_result.returncode != 0:
+                print(
+                    f"[sweep] reduction sbatch error:\n{dep_result.stderr}",
+                    flush=True,
+                )
+            else:
+                reduce_job_id = dep_result.stdout.strip().split()[-1]
+                print(
+                    f"[sweep] submitted reduction job {reduce_job_id}",
+                    flush=True,
+                )
+
+    return 0
+
+
+def run_sweep_task(
+    config_path: Path,
+    binary_path: Path,
+    manifest_path: Path,
+    task_id: int,
+    pipeline_dir: Path,
+) -> int:
+    """Run one task from a sweep SLURM array.
+
+    Loads the manifest, extracts the parameter set for *task_id*, builds a
+    :class:`CurvedSimulationCase` with those parameters, and runs the binary.
+
+    Parameters
+    ----------
+    config_path:
+        Path to the ``.py`` sweep config file (must define ``make_case``).
+    binary_path:
+        Path to the multi-grid solver binary.
+    manifest_path:
+        Path to ``sweep_manifest.json`` written by :func:`run_sweep`.
+    task_id:
+        Zero-based index into ``manifest["runs"]`` — typically
+        ``$SLURM_ARRAY_TASK_ID``.
+    pipeline_dir:
+        Working directory passed to the solver subprocess.
+
+    Returns
+    -------
+    int
+        Exit code (0 = success).
+    """
+    import json
+
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    runs = manifest["runs"]
+    if task_id < 0 or task_id >= len(runs):
+        raise IndexError(
+            f"task_id {task_id} out of range for manifest with "
+            f"{len(runs)} runs."
+        )
+    run = runs[task_id]
+    params: Dict = run["params"]
+
+    print(
+        f"[sweep-task {task_id}] tag={run['tag']}  params={params}",
+        flush=True,
+    )
+
+    make_case_fn, _ = load_sweep_spec(config_path)
+    case = make_case_fn(**params)
+
+    env = build_curved_env(case)
+    env["RUN_TAG"] = run["tag"]
+    if not env.get("RUN_STAMP"):
+        env["RUN_STAMP"] = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    print(
+        f"[sweep-task {task_id}] launching {binary_path} …", flush=True
+    )
+    subprocess.run([str(binary_path)], check=True, env=env, cwd=pipeline_dir)
+    print(f"[sweep-task {task_id}] solver finished.", flush=True)
+
+    # Auto-generate sample diameter profile plot if enabled.
+    if int(env.get("WRITE_PNG", "1")):
+        _run_profile_plot(env, pipeline_dir)
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -1415,6 +2028,34 @@ def main() -> int:
         default=None,
         help="Save a cross-section profile PNG to FILE and exit",
     )
+    parser.add_argument(
+        "--sweep",
+        action="store_true",
+        help=(
+            "Generate sweep_manifest.json and submit a SLURM array job. "
+            "Requires the config file to define make_case() and SWEEP."
+        ),
+    )
+    parser.add_argument(
+        "--sweep-task",
+        metavar="INT",
+        type=int,
+        default=None,
+        help=(
+            "Run a single sweep task by its zero-based index. "
+            "The manifest path is taken from --manifest or the SWEEP_MANIFEST "
+            "environment variable."
+        ),
+    )
+    parser.add_argument(
+        "--manifest",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Path to sweep_manifest.json used by --sweep-task. "
+            "Overrides the SWEEP_MANIFEST environment variable."
+        ),
+    )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent
@@ -1424,6 +2065,29 @@ def main() -> int:
     binary_path = Path(args.binary)
     if not binary_path.is_absolute():
         binary_path = repo_root / binary_path
+
+    # ── Sweep dispatch ──────────────────────────────────────────────────────
+    if args.sweep:
+        return run_sweep(config_path, binary_path, repo_root)
+
+    if args.sweep_task is not None:
+        manifest_path_str = (
+            args.manifest
+            or os.environ.get("SWEEP_MANIFEST")
+        )
+        if not manifest_path_str:
+            print(
+                "[curved-grid] ERROR: --sweep-task requires --manifest or "
+                "the SWEEP_MANIFEST environment variable.",
+                flush=True,
+            )
+            return 1
+        manifest_path = Path(manifest_path_str)
+        if not manifest_path.is_absolute():
+            manifest_path = repo_root / manifest_path
+        return run_sweep_task(
+            config_path, binary_path, manifest_path, args.sweep_task, repo_root
+        )
 
     case = load_curved_case(config_path)
 
