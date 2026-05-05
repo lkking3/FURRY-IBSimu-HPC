@@ -38,8 +38,18 @@ from __future__ import annotations
 
 import itertools
 import math
+import sys
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Sequence
+from typing import Any, Dict, List, Sequence
+
+# typing.Literal requires Python 3.8+; fall back gracefully on 3.7
+if sys.version_info >= (3, 8):
+    from typing import Literal
+else:
+    try:
+        from typing_extensions import Literal
+    except ImportError:
+        Literal = None  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +129,7 @@ class SweepSpec:
         sweep family in the results directory.
     """
     axes: List[SweepAxis] = field(default_factory=list)
-    mode: Literal["product", "zip"] = "product"
+    mode: str = "product"  # "product" or "zip"
     reduce: bool = False
     tag: str = ""
 
