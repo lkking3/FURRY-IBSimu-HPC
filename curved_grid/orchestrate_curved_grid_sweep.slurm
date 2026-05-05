@@ -105,7 +105,7 @@ echo "  Node:      $(hostname)"
 echo "  Started:   $(date)"
 echo "============================================================"
 
-python "$PIPELINE_SCRIPT" \
+python3 "$PIPELINE_SCRIPT" \
     --sweep-task "$SLURM_ARRAY_TASK_ID" \
     --manifest   "$SWEEP_MANIFEST" \
     --config     "$SWEEP_CONFIG" \
