@@ -1831,6 +1831,17 @@ def run_sweep(
 
     n_runs = len(runs_params)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    def _make_run_tag(idx: int, params: Dict) -> str:
+        """Build a compact RUN_TAG that encodes the swept values.
+
+        Example: t0003_AP_RADIUS_M-0.0015_R_SCR_M-0.1
+        """
+        parts = [f"t{idx:04d}"]
+        for k, v in params.items():
+            val_str = f"{v:.6g}" if isinstance(v, float) else str(v)
+            parts.append(f"{k}-{val_str}")
+        return "_".join(parts)
+
     manifest: Dict = {
         "meta": {
             "config": str(config_path),
@@ -1843,7 +1854,7 @@ def run_sweep(
         "runs": [
             {
                 "idx": i,
-                "tag": f"sweep_{i:04d}",
+                "tag": _make_run_tag(i, params),
                 "params": params,
             }
             for i, params in enumerate(runs_params)
