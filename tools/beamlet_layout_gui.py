@@ -1240,7 +1240,7 @@ class App(tk.Tk):
         ("TUBE_WALL_T_M",  "0.0002",               "Drift tube wall thickness (m)"),
         # ── Physics / solver ─────────────────────────────────────────────
         ("H",              "0.0001",               "Mesh cell size (m)"),
-        ("ION_N",          "1e16",                 "Ion number density (m^-3)"),
+        ("PLASMA_NI_M3",   "1e16",                 "Ion number density (m^-3)"),
         ("SC_FACTOR",      "0.0005",               "Space-charge compensation factor"),
     ]
 
