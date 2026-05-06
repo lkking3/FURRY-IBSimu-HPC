@@ -4,23 +4,14 @@
 #
 # SLURM job array for sweeping over curved-grid parameters.
 #
-# Usage (submit from the curved_grid/ directory):
-#   sbatch \
-#     --array=0-<N-1> \
-#     --export=SWEEP_MANIFEST=<path/to/sweep_manifest.json>,\
-#              SWEEP_CONFIG=<path/to/curved_grid_case.py>,\
-#              SWEEP_BINARY=<path/to/multi_grid_2d_curved> \
-#     orchestrate_curved_grid_sweep.slurm
+# Usage — just run --sweep from the curved_grid/ directory:
+#   python3 curved_grid_pipeline.py --sweep --config <case_file.py>
 #
-# The pipeline generates these values when you run:
-#   python curved_grid_pipeline.py --sweep --config <case_file.py>
-#
-# It prints the exact sbatch command with the correct --array=0-<N-1> bound
-# and --export values, so you can copy-paste it directly.
+# That command generates the manifest (for provenance) and submits the
+# sbatch array job in one step.  No separate manifest generation needed.
 #
 # Environment variables
 # ----------------------
-# SWEEP_MANIFEST   Path to the JSON manifest written by --sweep (required)
 # SWEEP_CONFIG     Path to the case .py file that defines make_case + SWEEP (required)
 # SWEEP_BINARY     Path to the compiled binary (default: ../sim/multi_grid_2d_curved)
 # REDUCE_SCRIPT    Path to reduce_best.py (default: ../tools/reduce_best.py)
@@ -49,14 +40,6 @@ PIPELINE_SCRIPT="$PIPELINE_DIR/curved_grid_pipeline.py"
 BINARY="${SWEEP_BINARY:-$SIM_DIR/multi_grid_2d_curved}"
 REDUCE="${REDUCE_SCRIPT:-$TOOLS_DIR/reduce_best.py}"
 
-# Derive manifest path from config name: <stem>_manifest.json in the same directory.
-# Convention matches curved_grid_pipeline.py --sweep output.
-# Can be overridden by passing SWEEP_MANIFEST explicitly in --export.
-if [[ -z "$SWEEP_MANIFEST" ]]; then
-    _cfg_stem="$(basename "${SWEEP_CONFIG}" .py)"
-    SWEEP_MANIFEST="$PIPELINE_DIR/${_cfg_stem}_manifest.json"
-fi
-
 # Resolve SWEEP_CONFIG to an absolute path if it isn't already
 if [[ "$SWEEP_CONFIG" != /* ]]; then
     SWEEP_CONFIG="$PIPELINE_DIR/$SWEEP_CONFIG"
@@ -67,11 +50,6 @@ fi
 # ---------------------------------------------------------------------------
 if [[ -z "$SWEEP_CONFIG" ]]; then
     echo "ERROR: SWEEP_CONFIG is not set." >&2
-    exit 1
-fi
-if [[ ! -f "$SWEEP_MANIFEST" ]]; then
-    echo "ERROR: Manifest not found: $SWEEP_MANIFEST" >&2
-    echo "       Run first:  python curved_grid_pipeline.py --sweep --config $SWEEP_CONFIG" >&2
     exit 1
 fi
 if [[ ! -f "$SWEEP_CONFIG" ]]; then
@@ -98,7 +76,6 @@ mkdir -p "$PIPELINE_DIR/logs"
 echo "============================================================"
 echo "  Sweep task ${SLURM_ARRAY_TASK_ID} of ${SLURM_ARRAY_TASK_MAX}"
 echo "  Array job ${SLURM_ARRAY_JOB_ID}"
-echo "  Manifest:  $SWEEP_MANIFEST"
 echo "  Config:    $SWEEP_CONFIG"
 echo "  Binary:    $BINARY"
 echo "  Node:      $(hostname)"
@@ -107,7 +84,6 @@ echo "============================================================"
 
 python3 "$PIPELINE_SCRIPT" \
     --sweep-task "$SLURM_ARRAY_TASK_ID" \
-    --manifest   "$SWEEP_MANIFEST" \
     --config     "$SWEEP_CONFIG" \
     --binary     "$BINARY"
 

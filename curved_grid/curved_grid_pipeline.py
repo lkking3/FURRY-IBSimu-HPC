@@ -1777,6 +1777,18 @@ def write_sweep_case_file(
     Path(path).write_text(content, encoding="utf-8")
 
 
+def _make_run_tag(idx: int, params: Dict) -> str:
+    """Build a compact RUN_TAG encoding the task index and swept values.
+
+    Example: t0003_AP_RADIUS_M-0.0015_R_SCR_M-0.1
+    """
+    parts = [f"t{idx:04d}"]
+    for k, v in params.items():
+        val_str = f"{v:.6g}" if isinstance(v, float) else str(v)
+        parts.append(f"{k}-{val_str}")
+    return "_".join(parts)
+
+
 def run_sweep(
     config_path: Path,
     binary_path: Path,
@@ -1831,16 +1843,6 @@ def run_sweep(
 
     n_runs = len(runs_params)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    def _make_run_tag(idx: int, params: Dict) -> str:
-        """Build a compact RUN_TAG that encodes the swept values.
-
-        Example: t0003_AP_RADIUS_M-0.0015_R_SCR_M-0.1
-        """
-        parts = [f"t{idx:04d}"]
-        for k, v in params.items():
-            val_str = f"{v:.6g}" if isinstance(v, float) else str(v)
-            parts.append(f"{k}-{val_str}")
-        return "_".join(parts)
 
     manifest: Dict = {
         "meta": {
@@ -1943,26 +1945,24 @@ def run_sweep(
 def run_sweep_task(
     config_path: Path,
     binary_path: Path,
-    manifest_path: Path,
     task_id: int,
     pipeline_dir: Path,
 ) -> int:
     """Run one task from a sweep SLURM array.
 
-    Loads the manifest, extracts the parameter set for *task_id*, builds a
-    :class:`CurvedSimulationCase` with those parameters, and runs the binary.
+    Derives the parameter set for *task_id* directly from the sweep config's
+    SWEEP spec — no manifest file required.  This ensures tasks always use
+    the current config, eliminating stale-manifest bugs.
 
     Parameters
     ----------
     config_path:
-        Path to the ``.py`` sweep config file (must define ``make_case``).
+        Path to the ``.py`` sweep config file (must define ``make_case`` and
+        ``SWEEP``).
     binary_path:
         Path to the multi-grid solver binary.
-    manifest_path:
-        Path to ``sweep_manifest.json`` written by :func:`run_sweep`.
     task_id:
-        Zero-based index into ``manifest["runs"]`` — typically
-        ``$SLURM_ARRAY_TASK_ID``.
+        Zero-based combination index — typically ``$SLURM_ARRAY_TASK_ID``.
     pipeline_dir:
         Working directory passed to the solver subprocess.
 
@@ -1971,28 +1971,27 @@ def run_sweep_task(
     int
         Exit code (0 = success).
     """
-    import json
+    make_case_fn, sweep_spec = load_sweep_spec(config_path)
+    combos = sweep_spec.combinations()
 
-    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
-    runs = manifest["runs"]
-    if task_id < 0 or task_id >= len(runs):
+    if task_id < 0 or task_id >= len(combos):
         raise IndexError(
-            f"task_id {task_id} out of range for manifest with "
-            f"{len(runs)} runs."
+            f"task_id {task_id} out of range — config defines "
+            f"{len(combos)} combinations."
         )
-    run = runs[task_id]
-    params: Dict = run["params"]
+
+    params: Dict = combos[task_id]
+    tag = _make_run_tag(task_id, params)
 
     print(
-        f"[sweep-task {task_id}] tag={run['tag']}  params={params}",
+        f"[sweep-task {task_id}] tag={tag}  params={params}",
         flush=True,
     )
 
-    make_case_fn, _ = load_sweep_spec(config_path)
     case = make_case_fn(**params)
 
     env = build_curved_env(case)
-    env["RUN_TAG"] = run["tag"]
+    env["RUN_TAG"] = tag
     if not env.get("RUN_STAMP"):
         env["RUN_STAMP"] = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -2082,22 +2081,8 @@ def main() -> int:
         return run_sweep(config_path, binary_path, repo_root)
 
     if args.sweep_task is not None:
-        manifest_path_str = (
-            args.manifest
-            or os.environ.get("SWEEP_MANIFEST")
-        )
-        if not manifest_path_str:
-            print(
-                "[curved-grid] ERROR: --sweep-task requires --manifest or "
-                "the SWEEP_MANIFEST environment variable.",
-                flush=True,
-            )
-            return 1
-        manifest_path = Path(manifest_path_str)
-        if not manifest_path.is_absolute():
-            manifest_path = repo_root / manifest_path
         return run_sweep_task(
-            config_path, binary_path, manifest_path, args.sweep_task, repo_root
+            config_path, binary_path, args.sweep_task, repo_root
         )
 
     case = load_curved_case(config_path)
