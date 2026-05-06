@@ -2024,7 +2024,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--binary",
-        default="multi_grid_2d",
+        default="multi_grid_2d_curved",
         help="Path to the multi-grid solver binary",
     )
     parser.add_argument(
