@@ -1657,7 +1657,7 @@ class App(tk.Tk):
                 path,
                 screen_offsets_m=offsets,
                 accel_offsets_m=accel_offsets_m,
-                ap_radius_m=ap_m,
+                ap_rad_m=ap_m,
                 R_scr_m=R_scr_m,
                 R_acc_m=R_acc_m,
                 screen_voltage_v=vs,

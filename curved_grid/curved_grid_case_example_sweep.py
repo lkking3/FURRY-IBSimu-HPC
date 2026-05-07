@@ -23,7 +23,7 @@ ACCEL_T_M       = 0.006
 GAP_AFTER_M     = 0.002
 VS_V            = 0.0
 VA_V            = -10000.0
-AP_RADIUS_M     = 0.002
+AP_RAD_M     = 0.002
 
 # ── Aperture offsets (m) ─────────────────────────────────────────
 SCREEN_OFFSETS_M = [0]
@@ -57,7 +57,7 @@ def make_case(**overrides):
     gap_after_m  = _ov("GAP_AFTER",  "GAP_AFTER_M", default=GAP_AFTER_M)
     vs_v         = _ov("VS_V",       default=VS_V)
     va_v         = _ov("VA_V",       default=VA_V)
-    ap_radius_m  = _ov("AP_RAD",     "AP_RADIUS_M", default=AP_RADIUS_M)
+    ap_radius_m  = _ov("AP_RAD",     "AP_RAD_M", default=AP_RAD_M)
 
     # Re-derive R_ACC_M when R_SCR or geometry changes (only treat R_ACC as
     # explicitly set if either short or long form was passed).
