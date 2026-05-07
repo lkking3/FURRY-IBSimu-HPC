@@ -39,17 +39,30 @@ def make_case(**overrides):
     when supplied, allowing the sweep runner to vary individual
     parameters without mutating module state.
     """
-    r_scr_m      = overrides.get("R_SCR_M",     R_SCR_M)
-    r_acc_m_base = overrides.get("R_ACC_M",     R_ACC_M)
-    screen_t_m   = overrides.get("SCREEN_T_M",  SCREEN_T_M)
-    accel_t_m    = overrides.get("ACCEL_T_M",   ACCEL_T_M)
-    gap_after_m  = overrides.get("GAP_AFTER_M", GAP_AFTER_M)
-    vs_v         = overrides.get("VS_V",         VS_V)
-    va_v         = overrides.get("VA_V",         VA_V)
-    ap_radius_m  = overrides.get("AP_RADIUS_M", AP_RADIUS_M)
+    # Accept either the short name (used in SweepAxis.name and the run-tag
+    # encoding, e.g. "AP_RAD", "R_SCR") or the full "_M" name.  A plain
+    # overrides.get("X_M", X_M) silently drops a SweepAxis named "X" and
+    # falls back to the module default, producing sweeps that look correct
+    # in the directory tag but never actually vary the parameter.
+    def _ov(*keys, default):
+        for k in keys:
+            if k in overrides:
+                return overrides[k]
+        return default
 
-    # Re-derive R_ACC_M when R_SCR_M or geometry changes
-    if "R_ACC_M" not in overrides:
+    r_scr_m      = _ov("R_SCR",      "R_SCR_M",     default=R_SCR_M)
+    r_acc_m_base = _ov("R_ACC",      "R_ACC_M",     default=R_ACC_M)
+    screen_t_m   = _ov("SCREEN_T",   "SCREEN_T_M",  default=SCREEN_T_M)
+    accel_t_m    = _ov("ACCEL_T",    "ACCEL_T_M",   default=ACCEL_T_M)
+    gap_after_m  = _ov("GAP_AFTER",  "GAP_AFTER_M", default=GAP_AFTER_M)
+    vs_v         = _ov("VS_V",       default=VS_V)
+    va_v         = _ov("VA_V",       default=VA_V)
+    ap_radius_m  = _ov("AP_RAD",     "AP_RADIUS_M", default=AP_RADIUS_M)
+
+    # Re-derive R_ACC_M when R_SCR or geometry changes (only treat R_ACC as
+    # explicitly set if either short or long form was passed).
+    r_acc_explicit = ("R_ACC" in overrides) or ("R_ACC_M" in overrides)
+    if not r_acc_explicit:
         r_acc_m = concentric_accel_radius(
             r_scr_m, screen_t_m, gap_after_m, SCREEN_OFFSETS_M
         )
