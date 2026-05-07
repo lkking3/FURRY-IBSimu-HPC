@@ -666,10 +666,14 @@ def _run_profile_plot(env: Dict[str, str], repo_root: Path) -> None:
     tag          = env.get("RUN_TAG", "")
     jobid        = env.get("SLURM_JOB_ID", "")
 
-    runname = prefix
+    # Must mirror the C++ binary's outdir construction in
+    # sim/multi_grid_2d_curved.cpp (search for `runname = prefix + "_" + stamp`).
+    # Order on disk is: <prefix>_<stamp>_<tag>_j<jobid>.  Any change to the
+    # C++ side must be reflected here or this function will silently fail to
+    # find sample_diameter_profile.json after every run.
+    runname = f"{prefix}_{stamp}"
     if tag:
         runname += f"_{tag}"
-    runname += f"_{stamp}"
     if jobid:
         runname += f"_j{jobid}"
 
