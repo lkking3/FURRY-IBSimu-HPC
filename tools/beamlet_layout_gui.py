@@ -1221,7 +1221,7 @@ class App(tk.Tk):
         ("GAP",    "Gap after screen", "mm",  "6"),
         ("VS",     "Screen voltage",   "V",   "0.0"),
         ("VA",     "Accel voltage",    "V",   "-15000.0"),
-        ("AP_RAD", "Bore radius",      "mm",  "1.5"),
+        ("AP_RAD_M", "Bore radius",      "mm",  "1.5"),
     ]
 
     # (key, default, description)
@@ -1563,7 +1563,7 @@ class App(tk.Tk):
                 gv["VS"].set(f"{g0.voltage_v:.1f}")
                 gv["VA"].set(f"{g1.voltage_v:.1f}" if g1 else "-15000.0")
                 bore_radii = [ap.radius_m for ap in g0.apertures if ap.radius_m > 0]
-                gv["AP_RAD"].set(
+                gv["AP_RAD_M"].set(
                     f"{bore_radii[0] * 1e3:.6g}" if bore_radii else "1.5"
                 )
 
@@ -1635,7 +1635,7 @@ class App(tk.Tk):
             gap_m   = float(gv["GAP"].get())   * 1e-3
             vs      = float(gv["VS"].get())
             va      = float(gv["VA"].get())
-            ap_m    = float(gv["AP_RAD"].get()) * 1e-3
+            ap_m    = float(gv["AP_RAD_M"].get()) * 1e-3
             env_dict = {k: v.get().strip()
                         for k, v in self.curved_env_vars.items()
                         if v.get().strip()}
@@ -1657,7 +1657,7 @@ class App(tk.Tk):
                 path,
                 screen_offsets_m=offsets,
                 accel_offsets_m=accel_offsets_m,
-                ap_rad_m=ap_m,
+                ap_rad=ap_m,
                 R_scr_m=R_scr_m,
                 R_acc_m=R_acc_m,
                 screen_voltage_v=vs,
@@ -1849,7 +1849,7 @@ class App(tk.Tk):
         dlg.resizable(False, False)
         dlg.grab_set()
 
-        param_var  = tk.StringVar(value=existing.name if existing else "AP_RAD")
+        param_var  = tk.StringVar(value=existing.name if existing else "AP_RAD_M")
         custom_var = tk.StringVar(value="" if existing is None or existing.name in self._all_sweep_param_names else existing.name)
         values_var = tk.StringVar()
         result: list = [None]   # mutable container so inner func can write it

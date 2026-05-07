@@ -911,7 +911,7 @@ def write_case_file(
         Radial offsets of accel apertures in metres.  When *None*, the
         concentric-sphere formula is applied using *R_scr_m*, *R_acc_m*,
         *screen_thickness_m*, and *gap_after_m*.
-    ap_rad_m:
+    ap_rad:
         Bore radius in metres (shared by screen and accel apertures).
     R_scr_m:
         Screen radius of curvature in metres.
@@ -993,7 +993,7 @@ def write_case_file(
         f'GAP_AFTER_M     = {gap_after_m:.8g}\n'
         f'VS_V            = {screen_voltage_v:.1f}\n'
         f'VA_V            = {accel_voltage_v:.1f}\n'
-        f'AP_RAD_M     = {ap_rad_m:.8g}\n'
+        f'AP_RAD_M     = {ap_rad:.8g}\n'
         f'\n'
         f'# \u2500\u2500 Aperture offsets (m) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n'
         f'SCREEN_OFFSETS_M = {_fmt_list(screen_offsets_m)}\n'
@@ -1489,7 +1489,7 @@ def write_sweep_case_file(
     gui_overrides: Optional[Dict[str, str]] = None,
     screen_offsets_m: Optional[List[float]] = None,
     accel_offsets_m: Optional[List[float]] = None,
-    ap_rad_m: float = 0.0015,
+    ap_rad: float = 0.0015,
     R_scr_m: float = 0.100,
     R_acc_m: Optional[float] = None,
     screen_voltage_v: float = 0.0,
@@ -1531,7 +1531,7 @@ def write_sweep_case_file(
     sweep_reduce:
         Passed to ``SweepSpec(reduce=…)``.  When True the SLURM orchestrator
         will submit a reduction job after the array completes.
-    screen_offsets_m, accel_offsets_m, ap_rad_m, R_scr_m, R_acc_m,
+    screen_offsets_m, accel_offsets_m, ap_rad, R_scr_m, R_acc_m,
     screen_voltage_v, accel_voltage_v, screen_thickness_m, accel_thickness_m,
     gap_after_m, env:
         Same semantics as :func:`write_case_file`.
@@ -1569,7 +1569,7 @@ def write_sweep_case_file(
         accel_thickness_m  = _g1.thickness_m if _g1 else accel_thickness_m
 
         _bore_radii = [ap.radius_m for ap in _g0.apertures if ap.radius_m > 0]
-        ap_rad_m = _bore_radii[0] if _bore_radii else ap_rad_m
+        ap_rad = _bore_radii[0] if _bore_radii else ap_rad
 
         screen_offsets_m = sorted({abs(ap.offset_m) for ap in _g0.apertures})
         accel_offsets_m  = None   # will be recomputed below
@@ -1584,7 +1584,7 @@ def write_sweep_case_file(
 
         # Apply GUI field overrides (string values from the editor)
         _ov = gui_overrides or {}
-        _GEOM_KEYS_MM  = {"R_SCR", "T_SCR", "T_ACC", "GAP", "AP_RAD"}
+        _GEOM_KEYS_MM  = {"R_SCR", "T_SCR", "T_ACC", "GAP", "AP_RAD_M"}
         _GEOM_KEY_MAP  = {
             "R_SCR":  "R_scr_m",
             "T_SCR":  "screen_thickness_m",
@@ -1592,7 +1592,7 @@ def write_sweep_case_file(
             "GAP":    "gap_after_m",
             "VS":     "screen_voltage_v",
             "VA":     "accel_voltage_v",
-            "AP_RAD": "ap_rad_m",
+            "AP_RAD_M": "ap_rad",
         }
         for gui_key, local_name in _GEOM_KEY_MAP.items():
             if gui_key in _ov:
@@ -1607,7 +1607,7 @@ def write_sweep_case_file(
                     elif local_name == "gap_after_m":        gap_after_m        = val_m
                     elif local_name == "screen_voltage_v":   screen_voltage_v   = val_m
                     elif local_name == "accel_voltage_v":    accel_voltage_v    = val_m
-                    elif local_name == "ap_rad_m":        ap_rad_m        = val_m
+                    elif local_name == "ap_rad":        ap_rad       = val_m
                 except (ValueError, KeyError):
                     pass
         # ENV overrides from GUI
@@ -1690,7 +1690,7 @@ def write_sweep_case_file(
         f'GAP_AFTER_M     = {gap_after_m:.8g}\n'
         f'VS_V            = {screen_voltage_v:.1f}\n'
         f'VA_V            = {accel_voltage_v:.1f}\n'
-        f'AP_RAD_M     = {ap_rad_m:.8g}\n'
+        f'AP_RAD_M     = {ap_rad:.8g}\n'
         f'\n'
         f'# ── Aperture offsets (m) ─────────────────────────────────────────\n'
         f'SCREEN_OFFSETS_M = {_fmt_list(screen_offsets_m)}\n'
@@ -1713,7 +1713,7 @@ def write_sweep_case_file(
         f'    gap_after_m  = overrides.get("GAP_AFTER_M", GAP_AFTER_M)\n'
         f'    vs_v         = overrides.get("VS_V",         VS_V)\n'
         f'    va_v         = overrides.get("VA_V",         VA_V)\n'
-        f'    ap_rad_m  = overrides.get("AP_RAD_M", AP_RAD_M)\n'
+        f'    ap_rad  = overrides.get("AP_RAD_M", AP_RAD_M)\n'
         f'\n'
         f'    # Re-derive R_ACC_M when R_SCR_M or geometry changes\n'
         f'    if "R_ACC_M" not in overrides:\n'
@@ -1727,7 +1727,7 @@ def write_sweep_case_file(
         f'        BeamletPair(\n'
         f'            screen_offset_m=s,\n'
         f'            steering_arc_m=arc,\n'
-        f'            screen_radius_m=ap_rad_m,\n'
+        f'            screen_radius_m=ap_rad,\n'
         f'        )\n'
         f'        for s, arc in zip(SCREEN_OFFSETS_M, STEERING_ARCS_M)\n'
         f'    ]\n'

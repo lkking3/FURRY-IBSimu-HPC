@@ -8,7 +8,7 @@ Usage in a case file
     from sweep_types import SweepAxis, SweepSpec, linspace, arange
 
     def make_case(**overrides):
-        AP_RADIUS_M  = overrides.get("AP_RADIUS_M",  0.0015)
+        AP_RAD_M  = overrides.get("AP_RAD_M",  0.0015)
         PLASMA_NI_M3 = overrides.get("PLASMA_NI_M3", 1e16)
         ...
         return SimulationCase(...)
@@ -17,7 +17,7 @@ Usage in a case file
 
     SWEEP = SweepSpec(
         axes=[
-            SweepAxis("AP_RADIUS_M",  linspace(0.001, 0.003, 5)),
+            SweepAxis("AP_RAD_M",  linspace(0.001, 0.003, 5)),
             SweepAxis("PLASMA_NI_M3", [1e16, 2e16, 5e16]),
         ],
         mode="product",   # "product" or "zip"
