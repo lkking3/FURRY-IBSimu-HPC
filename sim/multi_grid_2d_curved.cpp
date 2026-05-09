@@ -1931,17 +1931,33 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             const double I_outer_beamlet_A  = I_outer_beamlet_Apm  * Leff;
 
             // ---- 2.2c Per-beamlet windowed currents at PG-exit and AG-exit ----
-            // Each beamlet i is windowed to its own aperture bore:
-            //   PG window: [scr_offset_i - scr_rad_i,  scr_offset_i + scr_rad_i]  at x_pg_plane
-            //   AG window: [acc_offset_i - acc_rad_i,  acc_offset_i + acc_rad_i]  at x_ag_plane
-            // This gives a physically clean per-beamlet loss fraction
-            //   eta_loss_i = (I_pg_i - I_ag_i) / I_pg_i
-            // free from the cross-aperture contamination that affects the global planes.
+            // Each beamlet i is measured at its OWN sagitta-corrected probe plane:
+            //
+            //   x_pg_i = xs1 + sag(|scr_offset_i|, R_scr) + 0.5*h
+            //   x_ag_i = xa1 + sag(|acc_offset_i|, R_acc) + 0.5*h
+            //
+            // Using a single global x_pg_plane (based on max bore radius) places the
+            // plane INSIDE the screen body for outer beamlets on strongly curved grids,
+            // giving I_pg = 0 for those apertures.  The per-beamlet sagitta correction
+            // ensures the measurement plane is always just downstream of each aperture's
+            // own downstream face, in vacuum, yielding a physically meaningful loss fraction.
+            //
+            //   window:   [offset_i - bore_rad_i,  offset_i + bore_rad_i]
+            //   loss_frac_i = (I_pg_i - I_ag_i) / I_pg_i  (positive = lost to accel body)
+            //
+            // Helper: sagitta at radial position |y| on a spherical surface of radius R.
+            auto beamlet_sag = [](double y_off_m, double R_m) -> double {
+                if (!std::isfinite(R_m) || R_m <= 0.0) return 0.0;
+                const double ry = std::min(1.0, std::fabs(y_off_m) / R_m);
+                return R_m * (1.0 - std::sqrt(1.0 - ry * ry));
+            };
+
             struct BeamletCurrent {
                 double scr_offset_m, acc_offset_m;
                 double scr_rad_m,    acc_rad_m;
-                double I_pg_Apm,     I_ag_Apm;   // A/m (2-D Cartesian)
-                double I_pg_A,       I_ag_A;      // A  (scaled by Leff = pi*r_a/2)
+                double x_pg_m,       x_ag_m;       // per-beamlet probe plane positions
+                double I_pg_Apm,     I_ag_Apm;     // A/m (2-D Cartesian)
+                double I_pg_A,       I_ag_A;        // A  (scaled by Leff = pi*r_a/2)
             };
             std::vector<BeamletCurrent> blet_data;
             blet_data.reserve(n_beamlets_layout);
@@ -1952,9 +1968,13 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                 bc.scr_rad_m    = (bi < (int)g_scr_rads.size()) ? g_scr_rads[bi] : g_a_scr;
                 bc.acc_rad_m    = (bi < (int)g_acc_rads.size()) ? g_acc_rads[bi] : g_a_acc;
 
+                // Sagitta-corrected probe planes for this beamlet
+                bc.x_pg_m = xs1 + beamlet_sag(bc.scr_offset_m, first_grid.curv_radius) + 0.5*h;
+                bc.x_ag_m = xa1 + beamlet_sag(bc.acc_offset_m, last_grid.curv_radius)  + 0.5*h;
+
                 double Itmp = 0.0, ym = 0.0, yr = 0.0, yrc = 0.0, yam = 0.0, yamc = 0.0;
                 current_and_width_at_plane_window(
-                    x_pg_plane,
+                    bc.x_pg_m,
                     bc.scr_offset_m - bc.scr_rad_m,
                     bc.scr_offset_m + bc.scr_rad_m,
                     Itmp, ym, yr, yrc, yam, yamc);
@@ -1963,7 +1983,7 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
 
                 Itmp = ym = yr = yrc = yam = yamc = 0.0;
                 current_and_width_at_plane_window(
-                    x_ag_plane,
+                    bc.x_ag_m,
                     bc.acc_offset_m - bc.acc_rad_m,
                     bc.acc_offset_m + bc.acc_rad_m,
                     Itmp, ym, yr, yrc, yam, yamc);
@@ -2180,6 +2200,8 @@ const double P_sys_norm_sm = P_sys_norm_ag;
                        << ", \"acc_offset_m\":"  << std::setprecision(10) << bc.acc_offset_m
                        << ", \"scr_rad_m\":"     << std::setprecision(10) << bc.scr_rad_m
                        << ", \"acc_rad_m\":"     << std::setprecision(10) << bc.acc_rad_m
+                       << ", \"x_pg_m\":"        << std::setprecision(10) << bc.x_pg_m
+                       << ", \"x_ag_m\":"        << std::setprecision(10) << bc.x_ag_m
                        << ", \"I_pg_Apm\":"      << std::setprecision(10) << bc.I_pg_Apm
                        << ", \"I_ag_Apm\":"      << std::setprecision(10) << bc.I_ag_Apm
                        << ", \"I_pg_A\":"        << std::setprecision(10) << bc.I_pg_A
