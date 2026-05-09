@@ -32,11 +32,21 @@ def score_run(run_dir: Path, max_grid_loss_frac: float):
 
     steer = to_float(defl.get('steer_angle_deg'))
 
-    # Prefer per-beamlet windowed currents when available; the global
-    # diagnostic planes are contaminated by cross-aperture current in
-    # curved-grid geometries, causing I_ag > I_pg and negative loss fracs.
-    pb_list = bm.get('beamlet_currents', {}).get('per_beamlet', [])
-    if pb_list:
+    # Prefer pre-computed per-beamlet totals: each bore is measured at its own
+    # sagitta-corrected plane so the sum correctly captures radial density
+    # variation and cross-bore transfers cancel.  Fall back to summing the
+    # per_beamlet list for older runs, then to the legacy global-plane fields.
+    bc = bm.get('beamlet_currents', {})
+    totals = bc.get('totals', {})
+    pb_list = bc.get('per_beamlet', [])
+    if totals.get('I_pg_sum_A') is not None:
+        i_pg = totals['I_pg_sum_A']
+        i_ag = totals['I_ag_sum_A']
+        grid_loss_frac = totals.get('grid_loss_frac')
+        grid_tx        = totals.get('grid_transmission_frac')
+        if i_pg == 0.0:
+            i_pg = i_ag = grid_tx = grid_loss_frac = None
+    elif pb_list:
         i_pg = sum(b.get('I_pg_A', 0.0) for b in pb_list)
         i_ag = sum(b.get('I_ag_A', 0.0) for b in pb_list)
         if i_pg > 0.0:

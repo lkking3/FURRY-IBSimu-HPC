@@ -187,13 +187,22 @@ def extract_row(run_dir: Path, results_dir: Path) -> Dict[str, Any]:
     row["GOOD_SINGLE_BEAM"]  = coll.get("good_single_beam")
     row["LOST_TO_SIDEWALLS"] = coll.get("lost_to_sidewalls")
 
-    # Prefer per-beamlet windowed currents (curved-grid runs); fall back to
-    # global diagnostic planes for legacy flat-grid runs.  The global planes
-    # are unreliable for curved grids because cross-aperture contamination
-    # inflates I_ag_out above I_pg_in, making the derived loss fraction
-    # negative and therefore meaningless.
-    pb_list = bm.get("beamlet_currents", {}).get("per_beamlet", [])
-    if pb_list:
+    # Grid loss currents — preference order:
+    #   1. beamlet_currents.totals  (new runs: per-bore planes, sum is accurate)
+    #   2. sum of beamlet_currents.per_beamlet  (intermediate runs, same physics)
+    #   3. legacy global diagnostic planes  (old flat-grid runs)
+    bc      = bm.get("beamlet_currents", {})
+    totals  = bc.get("totals", {})
+    pb_list = bc.get("per_beamlet", [])
+    if totals.get("I_pg_sum_A") is not None:
+        i_pg_pb = totals["I_pg_sum_A"]
+        i_ag_pb = totals["I_ag_sum_A"]
+        row["I_PG_IN_A"]              = i_pg_pb
+        row["I_AG_OUT_A"]             = i_ag_pb
+        row["GRID_LOSS_A"]            = i_pg_pb - i_ag_pb
+        row["GRID_LOSS_FRAC"]         = totals.get("grid_loss_frac")
+        row["GRID_TRANSMISSION_FRAC"] = totals.get("grid_transmission_frac")
+    elif pb_list:
         i_pg_pb  = sum(b.get("I_pg_A", 0.0) for b in pb_list)
         i_ag_pb  = sum(b.get("I_ag_A", 0.0) for b in pb_list)
         row["I_PG_IN_A"]              = i_pg_pb

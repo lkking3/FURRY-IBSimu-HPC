@@ -1931,19 +1931,25 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             const double I_outer_beamlet_A  = I_outer_beamlet_Apm  * Leff;
 
             // ---- 2.2c Per-beamlet windowed currents at PG-exit and AG-exit ----
-            // Each beamlet i is measured at its OWN sagitta-corrected probe plane:
+            // Each beamlet i is measured using a TILTED-PLANE measurement aligned to
+            // the bore exit face of that beamlet.  For a spherically curved grid, aperture
+            // i at screen offset y_i exits at tilt angle:
             //
-            //   x_pg_i = xs1 + sag(|scr_offset_i|, R_scr) + 0.5*h
-            //   x_ag_i = xa1 + sag(|acc_offset_i|, R_acc) + 0.5*h
+            //   alpha_i = arcsin(|y_i| / R_scr)     (inward from the x-axis)
             //
-            // Using a single global x_pg_plane (based on max bore radius) places the
-            // plane INSIDE the screen body for outer beamlets on strongly curved grids,
-            // giving I_pg = 0 for those apertures.  The per-beamlet sagitta correction
-            // ensures the measurement plane is always just downstream of each aperture's
-            // own downstream face, in vacuum, yielding a physically meaningful loss fraction.
+            // A vertical plane (AXIS_X) cannot capture this correctly — it mixes current
+            // from beamlets whose bore exit faces overlap in x.  The tilted-plane approach
+            // samples the vertical plane at the bore-centre x, then:
             //
-            //   window:   [offset_i - bore_rad_i,  offset_i + bore_rad_i]
-            //   loss_frac_i = (I_pg_i - I_ag_i) / I_pg_i  (positive = lost to accel body)
+            //   (a) Expands the y-window by 1/cos(alpha) so it covers the full bore width
+            //       projected onto the vertical sample plane (geometric correction).
+            //   (b) Weights each particle's current contribution by
+            //         |cos(alpha) - sign(y_c) * yp * sin(alpha)|
+            //       where yp = vy/vx = DIAG_YP, to project the particle flux onto the
+            //       bore-normal direction rather than the x-axis (flux correction).
+            //
+            // Together these give a first-order approximation to integrating the current
+            // through the bore exit face itself, independent of where other beamlets are.
             //
             // Helper: sagitta at radial position |y| on a spherical surface of radius R.
             auto beamlet_sag = [](double y_off_m, double R_m) -> double {
@@ -1952,10 +1958,50 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                 return R_m * (1.0 - std::sqrt(1.0 - ry * ry));
             };
 
+            // Tilted-bore current measurement.
+            //   x_c     : x-coordinate of bore centre (bore exit face midpoint)
+            //   y_c     : y-coordinate of bore centre
+            //   alpha   : tilt angle of bore axis from x-axis (rad), >= 0
+            //   r_bore  : bore half-width (m)
+            // Returns current per unit length (A/m, 2-D Cartesian).
+            auto current_at_tilted_bore = [&](double x_c, double y_c,
+                                               double alpha, double r_bore) -> double {
+                const double cos_a = std::cos(alpha);
+                const double sin_a = std::sin(alpha);
+                // Expanded y-window: bore edge projected onto vertical sample plane.
+                const double r_win = (cos_a > 1e-9) ? r_bore / cos_a : r_bore;
+                // sign(y_c): determines which way the bore normal's y-component points.
+                const double sgn   = (y_c > 0.0) ? 1.0 : (y_c < 0.0) ? -1.0 : 0.0;
+
+                TrajectoryDiagnosticData tdata;
+                std::vector<trajectory_diagnostic_e> diag;
+                diag.push_back(DIAG_Y);
+                diag.push_back(DIAG_CURR);
+                diag.push_back(DIAG_YP);   // vy/vx — for bore-normal flux projection
+
+                pdb.trajectories_at_plane(tdata, AXIS_X, x_c, diag);
+
+                const std::vector<double> &yv   = tdata(0).data();
+                const std::vector<double> &curr = tdata(1).data();
+                const std::vector<double> &ypv  = tdata(2).data();
+
+                double Itot = 0.0;
+                const size_t N = curr.size();
+                for (size_t i = 0; i < N; ++i) {
+                    if (std::fabs(yv[i] - y_c) > r_win) continue;
+                    // Bore normal: n̂ = (cos α, -sign(y_c)·sin α)
+                    // |v · n̂| / |vx| = |cos α - sign(y_c)·yp·sin α|
+                    const double ang = std::fabs(cos_a - sgn * ypv[i] * sin_a);
+                    Itot += curr[i] * ang;
+                }
+                return Itot;
+            };
+
             struct BeamletCurrent {
                 double scr_offset_m, acc_offset_m;
                 double scr_rad_m,    acc_rad_m;
                 double x_pg_m,       x_ag_m;       // per-beamlet probe plane positions
+                double alpha_scr,    alpha_acc;     // bore tilt angles (rad)
                 double I_pg_Apm,     I_ag_Apm;     // A/m (2-D Cartesian)
                 double I_pg_A,       I_ag_A;        // A  (scaled by Leff = pi*r_a/2)
             };
@@ -1968,30 +2014,46 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                 bc.scr_rad_m    = (bi < (int)g_scr_rads.size()) ? g_scr_rads[bi] : g_a_scr;
                 bc.acc_rad_m    = (bi < (int)g_acc_rads.size()) ? g_acc_rads[bi] : g_a_acc;
 
-                // Sagitta-corrected probe planes for this beamlet
+                // Sagitta-corrected bore-exit plane positions
                 bc.x_pg_m = xs1 + beamlet_sag(bc.scr_offset_m, first_grid.curv_radius) + 0.5*h;
                 bc.x_ag_m = xa1 + beamlet_sag(bc.acc_offset_m, last_grid.curv_radius)  + 0.5*h;
 
-                double Itmp = 0.0, ym = 0.0, yr = 0.0, yrc = 0.0, yam = 0.0, yamc = 0.0;
-                current_and_width_at_plane_window(
-                    bc.x_pg_m,
-                    bc.scr_offset_m - bc.scr_rad_m,
-                    bc.scr_offset_m + bc.scr_rad_m,
-                    Itmp, ym, yr, yrc, yam, yamc);
-                bc.I_pg_Apm = Itmp;
-                bc.I_pg_A   = Itmp * Leff;
+                // Bore tilt angles — 0 for flat grids (curv_radius = inf)
+                const double R_scr = first_grid.curv_radius;
+                const double R_acc = last_grid.curv_radius;
+                bc.alpha_scr = std::isfinite(R_scr) && R_scr > 0.0
+                    ? std::asin(std::min(1.0, std::fabs(bc.scr_offset_m) / R_scr)) : 0.0;
+                bc.alpha_acc = std::isfinite(R_acc) && R_acc > 0.0
+                    ? std::asin(std::min(1.0, std::fabs(bc.acc_offset_m) / R_acc)) : 0.0;
 
-                Itmp = ym = yr = yrc = yam = yamc = 0.0;
-                current_and_width_at_plane_window(
-                    bc.x_ag_m,
-                    bc.acc_offset_m - bc.acc_rad_m,
-                    bc.acc_offset_m + bc.acc_rad_m,
-                    Itmp, ym, yr, yrc, yam, yamc);
-                bc.I_ag_Apm = Itmp;
-                bc.I_ag_A   = Itmp * Leff;
+                // Tilted-plane current at screen exit
+                bc.I_pg_Apm = current_at_tilted_bore(
+                    bc.x_pg_m, bc.scr_offset_m, bc.alpha_scr, bc.scr_rad_m);
+                bc.I_pg_A   = bc.I_pg_Apm * Leff;
+
+                // Tilted-plane current at accel exit
+                bc.I_ag_Apm = current_at_tilted_bore(
+                    bc.x_ag_m, bc.acc_offset_m, bc.alpha_acc, bc.acc_rad_m);
+                bc.I_ag_A   = bc.I_ag_Apm * Leff;
 
                 blet_data.push_back(bc);
             }
+
+            // Sum per-beamlet totals.  Each bore is measured at its own sagitta-corrected
+            // plane, so the sum is more accurate than a single global plane (plasma density
+            // and current vary with radial position; a flat global plane would need a
+            // multiplicative correction for the density profile).
+            double I_pg_blet_sum_Apm = 0.0, I_pg_blet_sum_A = 0.0;
+            double I_ag_blet_sum_Apm = 0.0, I_ag_blet_sum_A = 0.0;
+            for (const auto &bc : blet_data) {
+                I_pg_blet_sum_Apm += bc.I_pg_Apm;
+                I_pg_blet_sum_A   += bc.I_pg_A;
+                I_ag_blet_sum_Apm += bc.I_ag_Apm;
+                I_ag_blet_sum_A   += bc.I_ag_A;
+            }
+            const double grid_loss_frac_blet = (I_pg_blet_sum_A > 0.0)
+                ? (I_pg_blet_sum_A - I_ag_blet_sum_A) / I_pg_blet_sum_A : 0.0;
+            const double grid_tx_blet = 1.0 - grid_loss_frac_blet;
 
             // ---- 2.3 High-level beam summary for Stage-2 optimizer ----
             {
@@ -2187,6 +2249,17 @@ const double P_sys_norm_sm = P_sys_norm_ag;
                 mj << "      \"I_Apm\": "           << std::setprecision(10) << I_outer_beamlet_Apm << ",\n";
                 mj << "      \"I_A\": "             << std::setprecision(10) << I_outer_beamlet_A   << "\n";
                 mj << "    },\n";
+                // Summed totals: each bore measured at its own sagitta-corrected plane,
+                // so cross-bore transfers cancel in the sum and density variation along
+                // the radius is naturally captured without a correction factor.
+                mj << "    \"totals\": {\n";
+                mj << "      \"I_pg_sum_Apm\": "           << std::setprecision(10) << I_pg_blet_sum_Apm  << ",\n";
+                mj << "      \"I_pg_sum_A\": "             << std::setprecision(10) << I_pg_blet_sum_A    << ",\n";
+                mj << "      \"I_ag_sum_Apm\": "           << std::setprecision(10) << I_ag_blet_sum_Apm  << ",\n";
+                mj << "      \"I_ag_sum_A\": "             << std::setprecision(10) << I_ag_blet_sum_A    << ",\n";
+                mj << "      \"grid_loss_frac\": "         << std::setprecision(10) << grid_loss_frac_blet << ",\n";
+                mj << "      \"grid_transmission_frac\": " << std::setprecision(10) << grid_tx_blet        << "\n";
+                mj << "    },\n";
                 // Per-beamlet array: one entry per aperture pair, ordered as in SCREEN_OFF_LIST_M.
                 // I_pg_* = current at screen-exit plane windowed to the screen bore.
                 // I_ag_* = current at accel-exit plane windowed to the accel bore.
@@ -2202,6 +2275,8 @@ const double P_sys_norm_sm = P_sys_norm_ag;
                        << ", \"acc_rad_m\":"     << std::setprecision(10) << bc.acc_rad_m
                        << ", \"x_pg_m\":"        << std::setprecision(10) << bc.x_pg_m
                        << ", \"x_ag_m\":"        << std::setprecision(10) << bc.x_ag_m
+                       << ", \"alpha_scr_deg\":" << std::setprecision(6)  << bc.alpha_scr * (180.0/M_PI)
+                       << ", \"alpha_acc_deg\":" << std::setprecision(6)  << bc.alpha_acc * (180.0/M_PI)
                        << ", \"I_pg_Apm\":"      << std::setprecision(10) << bc.I_pg_Apm
                        << ", \"I_ag_Apm\":"      << std::setprecision(10) << bc.I_ag_Apm
                        << ", \"I_pg_A\":"        << std::setprecision(10) << bc.I_pg_A
