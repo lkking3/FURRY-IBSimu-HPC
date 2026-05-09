@@ -31,14 +31,28 @@ def score_run(run_dir: Path, max_grid_loss_frac: float):
     acc = meta.get('accel_chamfer') or {}
 
     steer = to_float(defl.get('steer_angle_deg'))
-    i_pg = to_float(currents.get('I_pg_in_A'))
-    i_ag = to_float(currents.get('I_ag_out_A'))
-    grid_loss_frac = to_float(currents.get('grid_loss_frac'))
-    grid_tx = to_float(currents.get('grid_transmission_frac'))
 
-    if grid_loss_frac is None and i_pg is not None and i_pg > 0.0 and i_ag is not None:
-        grid_tx = max(0.0, min(1.0, i_ag / i_pg))
-        grid_loss_frac = max(0.0, 1.0 - grid_tx)
+    # Prefer per-beamlet windowed currents when available; the global
+    # diagnostic planes are contaminated by cross-aperture current in
+    # curved-grid geometries, causing I_ag > I_pg and negative loss fracs.
+    pb_list = bm.get('beamlet_currents', {}).get('per_beamlet', [])
+    if pb_list:
+        i_pg = sum(b.get('I_pg_A', 0.0) for b in pb_list)
+        i_ag = sum(b.get('I_ag_A', 0.0) for b in pb_list)
+        if i_pg > 0.0:
+            grid_tx = i_ag / i_pg
+            grid_loss_frac = 1.0 - grid_tx
+        else:
+            i_pg = i_ag = grid_tx = grid_loss_frac = None
+    else:
+        i_pg = to_float(currents.get('I_pg_in_A'))
+        i_ag = to_float(currents.get('I_ag_out_A'))
+        grid_loss_frac = to_float(currents.get('grid_loss_frac'))
+        grid_tx = to_float(currents.get('grid_transmission_frac'))
+        # Last-resort fallback for old flat-grid runs that have no loss_frac field
+        if grid_loss_frac is None and i_pg is not None and i_pg > 0.0 and i_ag is not None:
+            grid_tx = max(0.0, min(1.0, i_ag / i_pg))
+            grid_loss_frac = max(0.0, 1.0 - grid_tx)
 
     if steer is None or not math.isfinite(steer):
         return None

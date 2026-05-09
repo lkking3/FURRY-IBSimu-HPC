@@ -1930,6 +1930,49 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             const double I_center_beamlet_A = I_center_beamlet_Apm * Leff;
             const double I_outer_beamlet_A  = I_outer_beamlet_Apm  * Leff;
 
+            // ---- 2.2c Per-beamlet windowed currents at PG-exit and AG-exit ----
+            // Each beamlet i is windowed to its own aperture bore:
+            //   PG window: [scr_offset_i - scr_rad_i,  scr_offset_i + scr_rad_i]  at x_pg_plane
+            //   AG window: [acc_offset_i - acc_rad_i,  acc_offset_i + acc_rad_i]  at x_ag_plane
+            // This gives a physically clean per-beamlet loss fraction
+            //   eta_loss_i = (I_pg_i - I_ag_i) / I_pg_i
+            // free from the cross-aperture contamination that affects the global planes.
+            struct BeamletCurrent {
+                double scr_offset_m, acc_offset_m;
+                double scr_rad_m,    acc_rad_m;
+                double I_pg_Apm,     I_ag_Apm;   // A/m (2-D Cartesian)
+                double I_pg_A,       I_ag_A;      // A  (scaled by Leff = pi*r_a/2)
+            };
+            std::vector<BeamletCurrent> blet_data;
+            blet_data.reserve(n_beamlets_layout);
+            for (int bi = 0; bi < n_beamlets_layout; ++bi) {
+                BeamletCurrent bc;
+                bc.scr_offset_m = g_scr_offs[bi];
+                bc.acc_offset_m = (bi < (int)g_acc_offs.size()) ? g_acc_offs[bi] : g_scr_offs[bi];
+                bc.scr_rad_m    = (bi < (int)g_scr_rads.size()) ? g_scr_rads[bi] : g_a_scr;
+                bc.acc_rad_m    = (bi < (int)g_acc_rads.size()) ? g_acc_rads[bi] : g_a_acc;
+
+                double Itmp = 0.0, ym = 0.0, yr = 0.0, yrc = 0.0, yam = 0.0, yamc = 0.0;
+                current_and_width_at_plane_window(
+                    x_pg_plane,
+                    bc.scr_offset_m - bc.scr_rad_m,
+                    bc.scr_offset_m + bc.scr_rad_m,
+                    Itmp, ym, yr, yrc, yam, yamc);
+                bc.I_pg_Apm = Itmp;
+                bc.I_pg_A   = Itmp * Leff;
+
+                Itmp = ym = yr = yrc = yam = yamc = 0.0;
+                current_and_width_at_plane_window(
+                    x_ag_plane,
+                    bc.acc_offset_m - bc.acc_rad_m,
+                    bc.acc_offset_m + bc.acc_rad_m,
+                    Itmp, ym, yr, yrc, yam, yamc);
+                bc.I_ag_Apm = Itmp;
+                bc.I_ag_A   = Itmp * Leff;
+
+                blet_data.push_back(bc);
+            }
+
             // ---- 2.3 High-level beam summary for Stage-2 optimizer ----
             {
                 // Does any beam actually reach the sample plane?
@@ -2110,7 +2153,8 @@ const double P_sys_norm_sm = P_sys_norm_ag;
 
                 mj << "  },\n";
                 mj << "  \"beamlet_currents\": {\n";
-                mj << "    \"x_plane_m\": "       << std::setprecision(10) << x_ag_plane           << ",\n";
+                mj << "    \"x_pg_plane_m\": "    << std::setprecision(10) << x_pg_plane           << ",\n";
+                mj << "    \"x_ag_plane_m\": "    << std::setprecision(10) << x_ag_plane           << ",\n";
                 mj << "    \"half_window_m\": "   << std::setprecision(10) << beamlet_half_window_m << ",\n";
                 mj << "    \"n_beamlets\": "      << n_beamlets_layout                              << ",\n";
                 mj << "    \"center_beamlet\": {\n";
@@ -2122,7 +2166,30 @@ const double P_sys_norm_sm = P_sys_norm_ag;
                 mj << "      \"screen_offset_m\": " << std::setprecision(10) << y_outer_beamlet_m   << ",\n";
                 mj << "      \"I_Apm\": "           << std::setprecision(10) << I_outer_beamlet_Apm << ",\n";
                 mj << "      \"I_A\": "             << std::setprecision(10) << I_outer_beamlet_A   << "\n";
-                mj << "    }\n";
+                mj << "    },\n";
+                // Per-beamlet array: one entry per aperture pair, ordered as in SCREEN_OFF_LIST_M.
+                // I_pg_* = current at screen-exit plane windowed to the screen bore.
+                // I_ag_* = current at accel-exit plane windowed to the accel bore.
+                // loss_frac = (I_pg - I_ag) / I_pg  (positive = absorbed by accel body).
+                mj << "    \"per_beamlet\": [\n";
+                for (int bi = 0; bi < (int)blet_data.size(); ++bi) {
+                    const auto &bc = blet_data[bi];
+                    const double loss = (bc.I_pg_A > 0.0) ? (bc.I_pg_A - bc.I_ag_A) / bc.I_pg_A : 0.0;
+                    mj << "      {"
+                       << "\"scr_offset_m\":"   << std::setprecision(10) << bc.scr_offset_m
+                       << ", \"acc_offset_m\":"  << std::setprecision(10) << bc.acc_offset_m
+                       << ", \"scr_rad_m\":"     << std::setprecision(10) << bc.scr_rad_m
+                       << ", \"acc_rad_m\":"     << std::setprecision(10) << bc.acc_rad_m
+                       << ", \"I_pg_Apm\":"      << std::setprecision(10) << bc.I_pg_Apm
+                       << ", \"I_ag_Apm\":"      << std::setprecision(10) << bc.I_ag_Apm
+                       << ", \"I_pg_A\":"        << std::setprecision(10) << bc.I_pg_A
+                       << ", \"I_ag_A\":"        << std::setprecision(10) << bc.I_ag_A
+                       << ", \"loss_frac\":"     << std::setprecision(6)  << loss
+                       << "}";
+                    if (bi + 1 < (int)blet_data.size()) mj << ",";
+                    mj << "\n";
+                }
+                mj << "    ]\n";
                 mj << "  }\n";
                 mj << "}\n";
             }

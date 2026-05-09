@@ -1,0 +1,260 @@
+%========================
+% FURRY_Paper_Structure.tex
+% TOFE 2026 -- Paper skeleton for assembly in Overleaf.
+% Section drafts are written separately and ported in order.
+% Status tags: [DRAFTED], [IN PROGRESS], [PENDING]
+%========================
+
+\documentclass[]{interact}
+
+\usepackage{graphicx}
+\usepackage{epstopdf}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\usepackage[numbers,sort&compress]{natbib}
+\bibpunct[, ]{[}{]}{,}{n}{}{,}
+
+\newcommand{\etal}{\textit{et al.}}
+\newcommand{\ie}{i.e.}
+\newcommand{\eg}{e.g.}
+\newcommand{\INSERT}[1]{\textcolor{red}{\textbf{[#1]}}}
+
+%========================
+\begin{document}
+
+\title{Design and Engineering of FURRY: A Plasma-Facing Materials Testing
+Platform}
+
+\author{
+\name{%
+Liam K. King\textsuperscript{a}\thanks{Corresponding author.
+Email: lkking3@ncsu.edu}
+\and
+Florian M. Laggner\textsuperscript{a}
+\and
+Arthur G. Mazzeo\textsuperscript{a}
+\and
+Christopher A. Andersen\textsuperscript{a}
+\and
+Evan Kallenberg\textsuperscript{a,b}
+\and
+Brendan J. Crowley\textsuperscript{b}
+}
+\affil{%
+\textsuperscript{a}North Carolina State University, Department of Nuclear
+Engineering, 2500 Katherine Stinson Dr, Raleigh, NC 27607, USA\\
+\textsuperscript{b}General Atomics, P.O.\ Box 85608, San Diego, CA 92186,
+USA
+}
+}
+
+\maketitle
+
+%------------------------
+\begin{abstract}
+\INSERT{ABSTRACT -- to be drafted last.}
+\end{abstract}
+
+\begin{keywords}
+beam optics; plasma-facing components; ion extraction; curved grid; IBSimu;
+materials testing; space-charge compensation; active cooling
+\end{keywords}
+
+\newpage
+
+%========================
+\section{Introduction}
+\label{sec:introduction}
+%========================
+% STATUS: [IN PROGRESS]
+% Motivation, facility gap (divertor vs. first wall), FURRY concept,
+% contributions (three), paper organization.
+
+\INSERT{SECTION 1 -- Introduction. See Sec1\_Introduction.tex}
+
+
+%========================
+\section{Background}
+\label{sec:background}
+%========================
+% STATUS: [DRAFTED]
+% CX-neutral physics, first-wall loading (Brooks Fig 1), Tokar CX spectra
+% (Fig 2), Eckstein sputtering yield (Fig 3), yield-weighted erosion
+% contribution spectrum (Fig 4), FURRY operating rationale.
+
+\INSERT{SECTION 2 -- Background. Port from Core\_draft\_v2.tex \S2.}
+
+
+%========================
+\section{System Overview and Design Objectives}
+\label{sec:system}
+%========================
+% Global-level section. Calculation-light. Establishes what FURRY must
+% do and why before discussing how.
+
+\subsection{Mission and Accelerated Exposure Targets}
+\label{sec:mission}
+% STATUS: [DRAFTED]
+% FURRY particle flux, erosion rate, surface recession rate.
+% Erosion-equivalent acceleration factor vs. Tokar keV CX reference.
+% Three scope limitations stated explicitly.
+
+\INSERT{SECTION 3.1 -- See Sec3p1\_Mission\_Exposure.tex}
+
+\subsection{Operating Envelope}
+\label{sec:operating_envelope}
+% STATUS: [PENDING]
+% Beam energy (up to 10~keV), current (up to 4~A), power (up to 40~kW).
+% Average heat flux at target: ~12.6~MW/m^2 at full power.
+% Two qualification modes: thermal vs. sputtering-dominant.
+% Child--Langmuir perveance scaling for lower-voltage operation.
+
+\INSERT{SECTION 3.2 -- Operating Envelope. PENDING.}
+
+\subsection{Diagnostic Suite}
+\label{sec:diagnostics}
+% STATUS: [PENDING]
+% TDS: hydrogen retention and desorption studies.
+% Thermocouples and IR camera: heat flux monitoring.
+
+\INSERT{SECTION 3.3 -- Diagnostic Suite. PENDING.}
+
+\subsection{Steady-State Design Challenges}
+\label{sec:design_challenges}
+% STATUS: [PENDING]
+% Overview of thermal management across all subsystems.
+% Ion-optics final design informs downstream subsystem design.
+% Motivates feasibility assessments in Section 4.
+
+\INSERT{SECTION 3.4 -- Steady-State Design Challenges. PENDING.}
+
+
+%========================
+\section{Subsystem Engineering Feasibility}
+\label{sec:subsystems}
+%========================
+% Mid-level section. 0D and analytical calculations showing design
+% feasibility. Higher-fidelity analysis follows grid design finalization.
+
+\subsection{Ion Source Interface and Faraday Shield}
+\label{sec:faraday}
+% STATUS: [PENDING]
+% LUPIN ICP source overview.
+% Faraday shield protecting quartz window under steady-state plasma exposure.
+% CFD: 10-channel vs. 30-channel pressure analysis -- 10-channel non-viable
+%   (exceeds 60~PSI spec), 30-channel viable at 10~GPM / 24~PSI outlet.
+% Thermal: 20~kW surface load -- resin non-viable, copper 30-channel
+%   viable with ~20~K temperature variation.
+
+\INSERT{SECTION 4.1 -- Ion Source Interface and Faraday Shield. PENDING.}
+
+\subsection{Sample Holder Active Cooling}
+\label{sec:sample_holder}
+% STATUS: [PENDING]
+% 40~kW onto 63.5~mm diameter target (12.6~MW/m^2).
+% Back-fed pin-and-fin copper cooling block.
+% 0D thermal feasibility: Q_in = Q_out.
+% Pin-fin geometry as heat transfer area multiplier.
+
+\INSERT{SECTION 4.2 -- Sample Holder Active Cooling. PENDING.}
+
+\subsection{Accelerator Grid Thermal Management}
+\label{sec:grid_cooling}
+% STATUS: [PENDING]
+% Screen grid: grounded, full plasma sheath exposure.
+%   Transparency ~20% (conservative), plasma power intercepted ~12--16~kW.
+%   0D cooling requirement.
+% Accelerator grid: ~0.2~A ion interception at 10~kV = ~2~kW deposited.
+%   Stated as conservative upper bound.
+%   0D cooling requirement.
+
+\INSERT{SECTION 4.3 -- Accelerator Grid Thermal Management. PENDING.}
+
+
+%========================
+\section{Ion-Optics Design}
+\label{sec:ion_optics}
+%========================
+% Primary technical contribution. IBSimu simulations, parameterized scans,
+% curved-grid analysis. Highest fidelity content in the paper.
+
+\subsection{Extraction Geometry, Simulation Approach, and Performance Metrics}
+\label{sec:methods}
+% STATUS: [DRAFTED]
+% Flat two-grid and curved-grid geometries, IBSimu model, mesh convergence,
+% performance metrics, Child--Langmuir perveance, SCC 0D estimate.
+
+\INSERT{SECTION 5.1 -- Port from Core\_draft\_v2.tex \S3.}
+
+\subsection{Flat Two-Grid Design and Electrostatic Steering Ceiling}
+\label{sec:results-steering}
+% STATUS: [DRAFTED]
+% Parameterized scan results. Max safe steering angle 3.43 deg insufficient
+% for full aperture population. Delivered current capped at ~1.39~A.
+
+\INSERT{SECTION 5.2 -- Port from Core\_draft\_v2.tex \S4.1.}
+
+\subsection{Spherically Curved Grid Concept and Geometric Aiming}
+\label{sec:results-curved}
+% STATUS: [DRAFTED -- INSERT tags pending HPC sweep results]
+% Concentric spherical-cap geometry, bore-clearance constraint, central
+% beamlet divergence diagnostic. IBSimu sweep over R, r_a, n_i.
+
+\INSERT{SECTION 5.3 -- Port from Core\_draft\_v2.tex \S4.2.}
+
+\subsection{Operating Envelope Characterization}
+\label{sec:results-envelope}
+% STATUS: [DRAFTED -- INSERT tags pending HPC sweep results]
+% Delivered current heatmap in R--n_i space. Recommended design point.
+% V--I operating space with constant power contours.
+
+\INSERT{SECTION 5.4 -- Port from Core\_draft\_v2.tex \S4.3.}
+
+
+%========================
+\section{Discussion}
+\label{sec:discussion}
+%========================
+% STATUS: [DRAFTED]
+% Performance ceiling set by geometric compatibility.
+% Curved-grid as established solution applied to compact test stand.
+% Quantitative necessity and sufficiency demonstration.
+% Limitations.
+
+\INSERT{SECTION 6 -- Port from Core\_draft\_v2.tex \S5.}
+
+
+%========================
+\section{Conclusions}
+\label{sec:conclusions}
+%========================
+% STATUS: [DRAFTED -- minor revisions needed]
+% Flat grid ceiling, curved grid recovery, operating envelope.
+% Future work: measured n_i(r), collisional transport, thermal-mechanical
+% analysis, prototype fabrication.
+
+\INSERT{SECTION 7 -- Port from Core\_draft\_v2.tex \S6.}
+
+
+%------------------------
+\section*{Acknowledgments}
+\INSERT{FUNDING, FACILITY, AND PERSONNEL ACKNOWLEDGMENTS.}
+
+\section*{Author Contributions}
+\INSERT{AUTHOR CONTRIBUTION STATEMENT.}
+
+\section*{Data Availability}
+\INSERT{DATA AVAILABILITY STATEMENT.}
+
+\section*{Disclosure Statement}
+The authors report no conflicts of interest.
+
+%------------------------
+\bibliographystyle{tfs}
+\bibliography{References}
+
+\end{document}
