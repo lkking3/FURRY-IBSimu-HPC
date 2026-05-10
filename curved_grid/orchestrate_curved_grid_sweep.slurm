@@ -24,7 +24,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=4G
-#SBATCH --time=04:00:00
+#SBATCH --time=10:00:00
 # Uncomment and edit for GPU/partition requirements:
 ##SBATCH --partition=compute
 ##SBATCH --gres=gpu:1

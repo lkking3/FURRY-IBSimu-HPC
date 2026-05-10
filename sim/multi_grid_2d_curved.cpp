@@ -1200,6 +1200,21 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             // ====== Beam diagnostics: currents + collimation ======
             // Only meaningful when ions are enabled and pdb is populated.
             const double Leff = 0.785 * (2.0 * g_a_scr);
+
+            // --- Total Bohm-boundary injection current (analytic) ---
+            // Each aperture emits J_Apm2 * (line length = 2*rad) per unit z-depth.
+            // Using this as the reference extraction current avoids all flat-plane
+            // geometry artifacts:  the ratio I_ag_global / I_emitted gives the
+            // end-to-end grid transmission including SG bore-wall interception
+            // (vignetting at large tilt angles) and AG body absorption.
+            double I_emitted_total_Apm = 0.0;
+            {
+                const size_t n_ap_e = std::min(g_scr_offs.size(), g_scr_rads.size());
+                for (size_t ai = 0; ai < n_ap_e; ++ai)
+                    I_emitted_total_Apm += J_Apm2 * 2.0 * g_scr_rads[ai];
+            }
+            const double I_emitted_total_A = I_emitted_total_Apm * Leff;
+
             // Helper: total current and basic width at a given x-plane
 
             auto current_and_width_at_plane = [&](double xpos,
@@ -1356,6 +1371,19 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
             double I_pg_in_Apm  = 0.0, ymean_pg = 0.0, yr_pg  = 0.0, yr_pg_c  = 0.0, ymax_pg  = 0.0, ymax_pg_c  = 0.0;
             double I_ag_out_Apm = 0.0, ymean_ag = 0.0, yr_ag  = 0.0, yr_ag_c  = 0.0, ymax_ag  = 0.0, ymax_ag_c  = 0.0;
             double I_sm_Apm     = 0.0, ymean_sm = 0.0, yr_sm  = 0.0, yr_sm_c  = 0.0, ymax_sm  = 0.0, ymax_sm_c  = 0.0;
+
+            // Mid-gap plane: flat plane at the center-bore inter-electrode midpoint.
+            // Inner bore ions are in transit through the gap here.  Outer bore ions
+            // are still inside the SG bore channel for highly curved grids, so this
+            // measurement captures only the inner bore portion of the current — it
+            // is primarily useful as a cross-check against the emitted total.
+            const double x_midgap = 0.5 * (xs1 + xa0);
+            double I_midgap_Apm = 0.0;
+            {
+                double _ym = 0.0, _yr = 0.0, _yrc = 0.0, _yam = 0.0, _yamc = 0.0;
+                current_and_width_at_plane(x_midgap, I_midgap_Apm, _ym, _yr, _yrc, _yam, _yamc);
+            }
+            const double I_midgap_A = I_midgap_Apm * Leff;
 
             current_and_width_at_plane(x_pg_plane, I_pg_in_Apm,  ymean_pg,  yr_pg,  yr_pg_c,  ymax_pg, ymax_pg_c);
             current_and_width_at_plane(x_ag_plane, I_ag_out_Apm, ymean_ag, yr_ag,  yr_ag_c,  ymax_ag, ymax_ag_c);
@@ -2107,7 +2135,17 @@ auto sec_since = [](const SteadyClock::time_point &a, const SteadyClock::time_po
                   mj << "    \"I_pg_in_Apm\": "   << std::setprecision(10) << I_pg_in_Apm  << ",\n";
                   mj << "    \"I_ag_out_Apm\": "  << std::setprecision(10) << I_ag_out_Apm << ",\n";
                   mj << "    \"I_pg_in_A\": "     << std::setprecision(10) << I_pg_in_A    << ",\n";
-                  mj << "    \"I_ag_out_A\": "    << std::setprecision(10) << I_ag_out_A   << "\n";
+                  mj << "    \"I_ag_out_A\": "    << std::setprecision(10) << I_ag_out_A   << ",\n";
+                  // Boundary-injection total: J_Bohm × 2r per aperture, summed analytically.
+                  // Use I_ag_out_A / I_emitted_A for end-to-end transmission (avoids all
+                  // flat-plane geometry artefacts of the curved multi-bore grid).
+                  mj << "    \"I_emitted_Apm\": "  << std::setprecision(10) << I_emitted_total_Apm << ",\n";
+                  mj << "    \"I_emitted_A\": "    << std::setprecision(10) << I_emitted_total_A   << ",\n";
+                  // Mid-gap: flat plane at x = (xs1 + xa0)/2 (center-bore inter-electrode mid).
+                  // Inner bore ions are in transit; outer bore ions still inside SG for curved grids.
+                  mj << "    \"x_midgap_m\": "     << std::setprecision(10) << x_midgap            << ",\n";
+                  mj << "    \"I_midgap_Apm\": "   << std::setprecision(10) << I_midgap_Apm        << ",\n";
+                  mj << "    \"I_midgap_A\": "     << std::setprecision(10) << I_midgap_A          << "\n";
                   mj << "  },\n";
                 mj << "  \"collimation\": {\n";
                 mj << "    \"y_rms_max_m\": "      << std::setprecision(10) << y_rms_max    << ",\n";

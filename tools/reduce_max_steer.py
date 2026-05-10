@@ -39,12 +39,26 @@ def score_run(run_dir: Path, max_grid_loss_frac: float):
     bc = bm.get('beamlet_currents', {})
     totals = bc.get('totals', {})
     pb_list = bc.get('per_beamlet', [])
-    if totals.get('I_pg_sum_A') is not None:
+    if currents.get('I_emitted_A') is not None:
+        # Best metric: analytic Bohm-boundary injection current as the reference,
+        # paired with the global conserved I_ag.  Avoids ALL flat-plane geometry
+        # artefacts from the curved multi-bore grid.
+        i_pg = to_float(currents.get('I_emitted_A'))   # analytic, no measurement bias
+        i_ag = to_float(currents.get('I_ag_out_A'))    # global conserved downstream
+        if i_pg is not None and i_pg > 0.0 and i_ag is not None:
+            grid_tx        = i_ag / i_pg
+            grid_loss_frac = 1.0 - grid_tx
+        else:
+            i_pg = i_ag = grid_tx = grid_loss_frac = None
+    elif totals.get('I_pg_sum_A') is not None:
+        # Fallback: per-beamlet I_pg sum (each bore at its own SG exit plane)
+        # paired with global I_ag.
         i_pg = totals['I_pg_sum_A']
-        i_ag = totals['I_ag_sum_A']
-        grid_loss_frac = totals.get('grid_loss_frac')
-        grid_tx        = totals.get('grid_transmission_frac')
-        if i_pg == 0.0:
+        i_ag = to_float(currents.get('I_ag_out_A'))
+        if i_pg is not None and i_pg > 0.0 and i_ag is not None:
+            grid_tx        = i_ag / i_pg
+            grid_loss_frac = 1.0 - grid_tx
+        else:
             i_pg = i_ag = grid_tx = grid_loss_frac = None
     elif pb_list:
         i_pg = sum(b.get('I_pg_A', 0.0) for b in pb_list)

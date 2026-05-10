@@ -188,20 +188,38 @@ def extract_row(run_dir: Path, results_dir: Path) -> Dict[str, Any]:
     row["LOST_TO_SIDEWALLS"] = coll.get("lost_to_sidewalls")
 
     # Grid loss currents — preference order:
-    #   1. beamlet_currents.totals  (new runs: per-bore planes, sum is accurate)
-    #   2. sum of beamlet_currents.per_beamlet  (intermediate runs, same physics)
-    #   3. legacy global diagnostic planes  (old flat-grid runs)
+    #   1. currents.I_emitted_A (analytic Bohm injection) vs currents.I_ag_out_A
+    #      — avoids all flat-plane geometry artefacts of the curved multi-bore grid
+    #   2. beamlet_currents.totals I_pg_sum vs global I_ag_out_A
+    #   3. sum of beamlet_currents.per_beamlet vs global I_ag_out_A
+    #   4. legacy global diagnostic planes  (old flat-grid runs)
     bc      = bm.get("beamlet_currents", {})
     totals  = bc.get("totals", {})
     pb_list = bc.get("per_beamlet", [])
-    if totals.get("I_pg_sum_A") is not None:
-        i_pg_pb = totals["I_pg_sum_A"]
-        i_ag_pb = totals["I_ag_sum_A"]
+    if cur.get("I_emitted_A") is not None:
+        i_pg_pb = cur["I_emitted_A"]
+        i_ag_pb = cur.get("I_ag_out_A")
         row["I_PG_IN_A"]              = i_pg_pb
         row["I_AG_OUT_A"]             = i_ag_pb
-        row["GRID_LOSS_A"]            = i_pg_pb - i_ag_pb
-        row["GRID_LOSS_FRAC"]         = totals.get("grid_loss_frac")
-        row["GRID_TRANSMISSION_FRAC"] = totals.get("grid_transmission_frac")
+        row["GRID_LOSS_A"]            = (i_pg_pb - i_ag_pb) if i_ag_pb is not None else None
+        if i_pg_pb and i_pg_pb > 0.0 and i_ag_pb is not None:
+            row["GRID_LOSS_FRAC"]         = (i_pg_pb - i_ag_pb) / i_pg_pb
+            row["GRID_TRANSMISSION_FRAC"] = i_ag_pb / i_pg_pb
+        else:
+            row["GRID_LOSS_FRAC"]         = None
+            row["GRID_TRANSMISSION_FRAC"] = None
+    elif totals.get("I_pg_sum_A") is not None:
+        i_pg_pb = totals["I_pg_sum_A"]
+        i_ag_pb = cur.get("I_ag_out_A")
+        row["I_PG_IN_A"]              = i_pg_pb
+        row["I_AG_OUT_A"]             = i_ag_pb
+        row["GRID_LOSS_A"]            = (i_pg_pb - i_ag_pb) if i_ag_pb is not None else None
+        if i_pg_pb and i_pg_pb > 0.0 and i_ag_pb is not None:
+            row["GRID_LOSS_FRAC"]         = (i_pg_pb - i_ag_pb) / i_pg_pb
+            row["GRID_TRANSMISSION_FRAC"] = i_ag_pb / i_pg_pb
+        else:
+            row["GRID_LOSS_FRAC"]         = None
+            row["GRID_TRANSMISSION_FRAC"] = None
     elif pb_list:
         i_pg_pb  = sum(b.get("I_pg_A", 0.0) for b in pb_list)
         i_ag_pb  = sum(b.get("I_ag_A", 0.0) for b in pb_list)
