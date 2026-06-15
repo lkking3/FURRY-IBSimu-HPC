@@ -95,9 +95,22 @@ static std::vector<Aperture> read_apertures( const std::string &path )
 // that d1 x d2 = n (so add_cylindrical_beam_with_energy launches along +n).
 static void tangent_basis( const Vec3D &n, Vec3D &d1, Vec3D &d2 )
 {
-    Vec3D a = ( std::fabs(n[0]) < 0.9 ) ? Vec3D(1,0,0) : Vec3D(0,1,0);
-    d1 = cross( a, n ); d1 /= d1.norm2();
-    d2 = cross( n, d1 ); d2 /= d2.norm2();   // d1 x d2 = n
+    // Reference axis not parallel to n
+    const double ax = ( std::fabs(n[0]) < 0.9 ) ? 1.0 : 0.0;
+    const double ay = ( std::fabs(n[0]) < 0.9 ) ? 0.0 : 1.0;
+    const double az = 0.0;
+    // d1 = a x n  (then normalise)
+    double d1x = ay*n[2] - az*n[1];
+    double d1y = az*n[0] - ax*n[2];
+    double d1z = ax*n[1] - ay*n[0];
+    double l1 = std::sqrt( d1x*d1x + d1y*d1y + d1z*d1z );
+    d1 = Vec3D( d1x/l1, d1y/l1, d1z/l1 );
+    // d2 = n x d1  (already unit length: n, d1 orthonormal)  -> d1 x d2 = n
+    double d2x = n[1]*d1[2] - n[2]*d1[1];
+    double d2y = n[2]*d1[0] - n[0]*d1[2];
+    double d2z = n[0]*d1[1] - n[1]*d1[0];
+    double l2 = std::sqrt( d2x*d2x + d2y*d2y + d2z*d2z );
+    d2 = Vec3D( d2x/l2, d2y/l2, d2z/l2 );
 }
 
 void simu( int argc, char **argv )
@@ -197,7 +210,8 @@ void simu( int argc, char **argv )
 
     // ----------------------------- injection setup -------------------------
     std::vector<Aperture> aps = read_apertures( AP_FILE );
-    const int n_per = std::max( 1, NPART / std::max((size_t)1, aps.size()) );
+    const size_t ap_denom = std::max( (size_t)1, aps.size() );
+    const int n_per = std::max( 1, (int)( (size_t)NPART / ap_denom ) );
     const double Te_J = TE * QE;
     const double mi   = M_AMU * AMU;
     const double cs   = std::sqrt( std::max(Te_J/mi, 0.0) );        // Bohm speed
@@ -249,36 +263,37 @@ void simu( int argc, char **argv )
     // Uses TrajectoryDiagnosticData at a z = const plane.
     try {
         const double z_diag = envd("Z_DIAG", LZ - 5.0*H);
+        // Column order matches the push order below; tdata(j).data() returns the
+        // per-trajectory vector for diagnostic j (same accessor as the 2-D module).
         std::vector<trajectory_diagnostic_e> diag;
-        diag.push_back( DIAG_X );  diag.push_back( DIAG_VX );
-        diag.push_back( DIAG_Y );  diag.push_back( DIAG_VY );
-        diag.push_back( DIAG_Z );  diag.push_back( DIAG_VZ );
-        diag.push_back( DIAG_CURR );
+        diag.push_back( DIAG_XP );    // x' = dx/dz  (slope w.r.t. plane-normal axis)
+        diag.push_back( DIAG_YP );    // y' = dy/dz
+        diag.push_back( DIAG_CURR );  // trajectory current [A]
         TrajectoryDiagnosticData tdata;
         pdb.trajectories_at_plane( tdata, AXIS_Z, z_diag, diag );
-        const size_t N = tdata.traj_count();
 
-        double Itot = 0.0, sx=0, sx2=0, sy=0, sy2=0; size_t n=0;
+        const std::vector<double> &xp  = tdata(0).data();
+        const std::vector<double> &yp  = tdata(1).data();
+        const std::vector<double> &cur = tdata(2).data();
+        const size_t N = cur.size();
+
+        double Itot = 0.0, s2 = 0.0;                 // current-weighted
         for( size_t i = 0; i < N; ++i ) {
-            double vx = tdata(i,1).val(), vy = tdata(i,3).val(), vz = tdata(i,5).val();
-            double I  = tdata(i,6).val();
-            if( vz <= 0.0 ) continue;
-            double xp = vx/vz, yp = vy/vz;               // divergence angles [rad]
-            Itot += I; sx+=xp; sx2+=xp*xp; sy+=yp; sy2+=yp*yp; ++n;
+            const double w = cur[i];
+            Itot += w;
+            s2   += w * ( xp[i]*xp[i] + yp[i]*yp[i] );
         }
-        double rms_x = n? std::sqrt(std::max(0.0, sx2/n - (sx/n)*(sx/n))) : 0.0;
-        double rms_y = n? std::sqrt(std::max(0.0, sy2/n - (sy/n)*(sy/n))) : 0.0;
-        double half_angle_deg = std::sqrt(rms_x*rms_x + rms_y*rms_y) * 180.0/M_PI;
+        const double rms_div = (Itot > 0.0) ? std::sqrt( s2 / Itot ) : 0.0; // [rad]
+        const double half_angle_deg = rms_div * 180.0 / M_PI;
 
         std::ofstream js( opath("diagnostics.json").c_str() );
         js << "{\n"
            << "  \"apertures_half\": " << aps.size() << ",\n"
            << "  \"z_diag_m\": " << z_diag << ",\n"
-           << "  \"n_traj_at_plane\": " << n << ",\n"
+           << "  \"n_traj_at_plane\": " << N << ",\n"
            << "  \"I_at_plane_half_A\": " << Itot << ",\n"
            << "  \"I_full_grid_A\": " << 2.0*Itot << ",\n"
-           << "  \"rms_div_x_rad\": " << rms_x << ",\n"
-           << "  \"rms_div_y_rad\": " << rms_y << ",\n"
+           << "  \"rms_div_rad\": " << rms_div << ",\n"
            << "  \"merged_half_angle_deg\": " << half_angle_deg << "\n"
            << "}\n";
         js.close();
