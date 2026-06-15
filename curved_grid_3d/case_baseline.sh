@@ -11,8 +11,10 @@ export LY=0.095                 # +/- transverse extent
 export LZ=0.2134                # axial length (stack + 170 mm drift)
 export Z_PLASMA=0.007           # plasma fills z < this (just upstream of screen)
 
-export SCREEN_STL=geometry/screen_half_pos.stl
-export ACCEL_STL=geometry/accel_half_pos.stl
+# Full-grid STLs (clean 2-manifold). The HALF model is realised by the x>=0
+# mesh domain + mirror BC at x=0, not by cutting the STL.
+export SCREEN_STL=geometry/screen_pos.stl
+export ACCEL_STL=geometry/accel_pos.stl
 export APERTURE_FILE=geometry/apertures_screen.dat
 
 # ---- electrodes ----

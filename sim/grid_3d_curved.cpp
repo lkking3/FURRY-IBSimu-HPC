@@ -124,8 +124,8 @@ void simu( int argc, char **argv )
     const double LY     = envd("LY", 0.095);            // +/- transverse extent [m]
     const double LZ     = envd("LZ", 0.2134);           // axial length [m]
 
-    const std::string SCREEN_STL = envs("SCREEN_STL","geometry/screen_half_pos.stl");
-    const std::string ACCEL_STL  = envs("ACCEL_STL", "geometry/accel_half_pos.stl");
+    const std::string SCREEN_STL = envs("SCREEN_STL","geometry/screen_pos.stl");
+    const std::string ACCEL_STL  = envs("ACCEL_STL", "geometry/accel_pos.stl");
     const std::string AP_FILE    = envs("APERTURE_FILE","geometry/apertures_screen.dat");
     const double STL_SCALE = envd("STL_SCALE", 1.0e-3); // mm -> m
 
