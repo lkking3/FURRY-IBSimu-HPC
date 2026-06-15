@@ -1,0 +1,13 @@
+# Build the 3-D curved-grid IBSimu module.
+#   make -f Makefile.3d
+CXX      ?= g++
+CXXFLAGS ?= -O2 -std=c++17
+PKG      := ibsimu-1.0.6dev
+
+grid_3d_curved: grid_3d_curved.cpp
+	$(CXX) $(CXXFLAGS) grid_3d_curved.cpp \
+	  $(shell pkg-config --cflags --libs $(PKG)) \
+	  -o $@
+
+clean:
+	rm -f grid_3d_curved

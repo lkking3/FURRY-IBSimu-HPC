@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Baseline 3-D curved two-grid extraction case.
+# Physics carried over from the validated 2-D curved module; geometry from the
+# assembled half-stack STLs (4 mm gap, concentric, optical axis +z).
+# Source this before launching the binary, or let run_grid_3d.slurm read it.
+
+# ---- geometry / domain (SI metres) ----
+export H=2.0e-4                 # cell size (0.2 mm)  -> ~481 M nodes, ~39 GB
+export LX=0.095                 # half radial extent (x>=0, mirror at x=0)
+export LY=0.095                 # +/- transverse extent
+export LZ=0.2134                # axial length (stack + 170 mm drift)
+export Z_PLASMA=0.007           # plasma fills z < this (just upstream of screen)
+
+export SCREEN_STL=geometry/screen_half_pos.stl
+export ACCEL_STL=geometry/accel_half_pos.stl
+export APERTURE_FILE=geometry/apertures_screen.dat
+
+# ---- electrodes ----
+export VS_V=0.0                 # screen / plasma potential
+export VA_V=-10000.0            # accel  (-10 kV)
+
+# ---- plasma + ion species (Ar+, carried over) ----
+export PLASMA_NI_M3=1.0e16
+export PLASMA_TE_EV=3.7
+export ION_Q_E=1.0
+export ION_M_AMU=40.0           # Argon
+export ION_TP_EV=0.0
+export ION_TT_EV=0.2
+export ION_J_SCALE=1.0
+
+# ---- solver / iteration ----
+export ION_NPART=60000          # total trajectories (~250 per aperture)
+export ION_ITER_MAX=12          # self-consistent Vlasov iterations
+export ION_MAX_STEPS=4000
+export SC_ALPHA=0.5             # space-charge averaging factor
+export ION_THREADS=1            # IBSimu Poisson solve is single-core
+
+export RESULTS_DIR=results_3d
