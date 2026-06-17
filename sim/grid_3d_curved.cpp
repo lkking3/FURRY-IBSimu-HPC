@@ -221,6 +221,25 @@ void simu( int argc, char **argv )
     std::printf("apertures=%zu  n_per=%d  J=%.3e A/m^2  E0=%.1f eV  species: q=%g m=%g amu\n",
                 aps.size(), n_per, J, E0, Q_E, M_AMU );
 
+    // Downstream diagnostic plane + per-iteration convergence history.
+    const double z_diag = envd("Z_DIAG", LZ - 5.0*H);
+    std::vector<double> hist_I, hist_div; std::vector<size_t> hist_n;
+
+    // Current-weighted transmitted current [A, half] and RMS divergence [rad] at
+    // a z = const plane. Throws if no trajectory crosses the plane yet.
+    auto plane_diag = [&]( double zpl, double &I_half, size_t &nplane, double &rms ){
+        std::vector<trajectory_diagnostic_e> diag;
+        diag.push_back( DIAG_XP ); diag.push_back( DIAG_YP ); diag.push_back( DIAG_CURR );
+        TrajectoryDiagnosticData td;
+        pdb.trajectories_at_plane( td, AXIS_Z, zpl, diag );
+        const std::vector<double> &xp = td(0).data();
+        const std::vector<double> &yp = td(1).data();
+        const std::vector<double> &cu = td(2).data();
+        nplane = cu.size(); I_half = 0.0; double s2 = 0.0;
+        for( size_t i = 0; i < nplane; ++i ) { I_half += cu[i]; s2 += cu[i]*(xp[i]*xp[i]+yp[i]*yp[i]); }
+        rms = (I_half > 0.0) ? std::sqrt( s2 / I_half ) : 0.0;
+    };
+
     // ----------------------------- Vlasov iteration ------------------------
     for( int it = 0; it < ITERM; ++it ) {
         std::printf("[iter %d/%d] solving Poisson ...\n", it+1, ITERM); std::fflush(stdout);
@@ -242,6 +261,19 @@ void simu( int argc, char **argv )
         pdb.iterate_trajectories( scharge, efield, bfield );
         std::printf("[iter %d/%d] traced npart=%u\n", it+1, ITERM, (unsigned)pdb.size());
 
+        // per-iteration convergence readout at the downstream plane
+        { double Ih=0.0, rmsd=0.0; size_t npl=0;
+          try {
+              plane_diag( z_diag, Ih, npl, rmsd );
+              std::printf("[iter %d/%d]  I_full=%.4e A  n@plane=%zu  half-angle=%.3f deg\n",
+                          it+1, ITERM, 2.0*Ih, npl, rmsd*180.0/M_PI);
+              hist_I.push_back(2.0*Ih); hist_div.push_back(rmsd*180.0/M_PI); hist_n.push_back(npl);
+          } catch( ... ) {
+              std::printf("[iter %d/%d]  (diag skipped: no plane crossings yet)\n", it+1, ITERM);
+          }
+        }
+        std::fflush(stdout);
+
         // space-charge averaging for stability (RADIS-style)
         if( it == 0 ) {
             scharge_ave = scharge;
@@ -258,50 +290,76 @@ void simu( int argc, char **argv )
     epot.save( opath("epot.dat") );
     pdb.save(  opath("pdb.dat")  );
 
-    // ----------------------------- diagnostics -----------------------------
-    // Merged-beam divergence at a downstream plane and accel interception.
-    // Uses TrajectoryDiagnosticData at a z = const plane.
-    try {
-        const double z_diag = envd("Z_DIAG", LZ - 5.0*H);
-        // Column order matches the push order below; tdata(j).data() returns the
-        // per-trajectory vector for diagnostic j (same accessor as the 2-D module).
-        std::vector<trajectory_diagnostic_e> diag;
-        diag.push_back( DIAG_XP );    // x' = dx/dz  (slope w.r.t. plane-normal axis)
-        diag.push_back( DIAG_YP );    // y' = dy/dz
-        diag.push_back( DIAG_CURR );  // trajectory current [A]
-        TrajectoryDiagnosticData tdata;
-        pdb.trajectories_at_plane( tdata, AXIS_Z, z_diag, diag );
-
-        const std::vector<double> &xp  = tdata(0).data();
-        const std::vector<double> &yp  = tdata(1).data();
-        const std::vector<double> &cur = tdata(2).data();
-        const size_t N = cur.size();
-
-        double Itot = 0.0, s2 = 0.0;                 // current-weighted
-        for( size_t i = 0; i < N; ++i ) {
-            const double w = cur[i];
-            Itot += w;
-            s2   += w * ( xp[i]*xp[i] + yp[i]*yp[i] );
-        }
-        const double rms_div = (Itot > 0.0) ? std::sqrt( s2 / Itot ) : 0.0; // [rad]
-        const double half_angle_deg = rms_div * 180.0 / M_PI;
+    // ----------------------------- final diagnostics -----------------------
+    // Headline numbers = last iteration's plane readout; convergence history is
+    // written so you can see whether current/divergence had settled.
+    {
+        const double Itot  = hist_I.empty()   ? 0.0 : hist_I.back();   // full grid [A]
+        const double hadeg = hist_div.empty() ? 0.0 : hist_div.back(); // merged half-angle [deg]
+        const size_t Npl   = hist_n.empty()   ? 0   : hist_n.back();
 
         std::ofstream js( opath("diagnostics.json").c_str() );
         js << "{\n"
            << "  \"apertures_half\": " << aps.size() << ",\n"
            << "  \"z_diag_m\": " << z_diag << ",\n"
-           << "  \"n_traj_at_plane\": " << N << ",\n"
-           << "  \"I_at_plane_half_A\": " << Itot << ",\n"
-           << "  \"I_full_grid_A\": " << 2.0*Itot << ",\n"
-           << "  \"rms_div_rad\": " << rms_div << ",\n"
-           << "  \"merged_half_angle_deg\": " << half_angle_deg << "\n"
-           << "}\n";
+           << "  \"iterations\": " << hist_I.size() << ",\n"
+           << "  \"n_traj_at_plane\": " << Npl << ",\n"
+           << "  \"I_full_grid_A\": " << Itot << ",\n"
+           << "  \"merged_half_angle_deg\": " << hadeg << ",\n"
+           << "  \"history_I_full_A\": [";
+        for( size_t i = 0; i < hist_I.size(); ++i )   js << (i?", ":"") << hist_I[i];
+        js << "],\n  \"history_half_angle_deg\": [";
+        for( size_t i = 0; i < hist_div.size(); ++i ) js << (i?", ":"") << hist_div[i];
+        js << "],\n  \"history_n_at_plane\": [";
+        for( size_t i = 0; i < hist_n.size(); ++i )   js << (i?", ":"") << hist_n[i];
+        js << "]\n}\n";
         js.close();
-        std::printf("diagnostics: I_full=%.4e A  merged half-angle=%.3f deg  (z=%.4f)\n",
-                    2.0*Itot, half_angle_deg, z_diag);
-    } catch( Error e ) {
-        std::printf("WARNING: diagnostics block failed (reconcile API on cluster)\n");
-        e.print_error_message( ibsimu.message(0) );
+        std::printf("FINAL: I_full=%.4e A  half-angle=%.3f deg  (z=%.4f, %zu iters)\n",
+                    Itot, hadeg, z_diag, hist_I.size());
+    }
+
+    // ----------------------------- visualisation (headless PNG) ------------
+    // GeomPlotter renders 2-D cut-planes of the 3-D model straight to PNG -- no
+    // display/X11 needed. Data is already saved above, so a plotting failure is
+    // non-fatal.
+    if( envi("WRITE_PNG", 1) ) {
+        try {
+            const int W    = envi("PNG_W", 1800), Hpx = envi("PNG_H", 900);
+            const int ylev = (int)( scharge.size(1) / 2 );          // y=0 slice (mirror plane)
+            const int zlev = (int)std::lround( z_diag / H );        // z = z_diag slice
+
+            // (a) longitudinal view: beamlets through the grids + drift
+            GeomPlotter gp( geom );
+            gp.set_size( W, Hpx );
+            gp.set_view( VIEW_ZX, ylev );
+            gp.set_epot( &epot );
+            gp.set_efield( &efield );
+            gp.set_particle_database( &pdb );
+            gp.plot_png( opath("beam_zx.png").c_str() );
+
+            // (b) close-up on the grid stack  (z in [0,0.06] m, x in [-0.05,0.05] m)
+            GeomPlotter gz( geom );
+            gz.set_size( 1200, 1000 );
+            gz.set_view( VIEW_ZX, ylev );
+            gz.set_epot( &epot );
+            gz.set_efield( &efield );
+            gz.set_particle_database( &pdb );
+            gz.set_ranges( 0.0, -0.05, 0.06, 0.05 );
+            gz.plot_png( opath("beam_zx_closeup.png").c_str() );
+
+            // (c) transverse beam footprint at the diagnostic plane
+            GeomPlotter gt( geom );
+            gt.set_size( 1000, 1000 );
+            gt.set_view( VIEW_XY, zlev );
+            gt.set_epot( &epot );
+            gt.set_particle_database( &pdb );
+            gt.plot_png( opath("beam_xy_plane.png").c_str() );
+
+            std::printf("wrote PNGs: beam_zx.png, beam_zx_closeup.png, beam_xy_plane.png\n");
+        } catch( Error e ) {
+            std::printf("WARNING: PNG plotting failed (state .dat files already saved)\n");
+            e.print_error_message( ibsimu.message(0) );
+        }
     }
 }
 
