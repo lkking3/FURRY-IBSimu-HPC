@@ -113,6 +113,40 @@ static void tangent_basis( const Vec3D &n, Vec3D &d1, Vec3D &d2 )
     d2 = Vec3D( d2x/l2, d2y/l2, d2z/l2 );
 }
 
+// Write a MeshScalarField as a legacy-VTK STRUCTURED_POINTS volume (BINARY,
+// big-endian as the format requires). 'stride' downsamples to keep files small
+// for ParaView (stride 2 -> 1/8 the nodes). x varies fastest.
+static float to_be_float( double d )
+{
+    float v = (float)d; uint32_t x;
+    std::memcpy( &x, &v, 4 ); x = __builtin_bswap32( x );
+    std::memcpy( &v, &x, 4 ); return v;
+}
+static void write_vtk_scalar( const std::string &path, const char *name,
+                              MeshScalarField &f, int s )
+{
+    if( s < 1 ) s = 1;
+    const uint32_t nx = f.size(0), ny = f.size(1), nz = f.size(2);
+    const double ox = f.origo(0), oy = f.origo(1), oz = f.origo(2), h = f.h();
+    const uint32_t dx = (nx-1)/s + 1, dy = (ny-1)/s + 1, dz = (nz-1)/s + 1;
+    std::ofstream o( path.c_str(), std::ios::binary );
+    o << "# vtk DataFile Version 3.0\n"
+      << "grid_3d_curved " << name << "\nBINARY\n"
+      << "DATASET STRUCTURED_POINTS\n"
+      << "DIMENSIONS " << dx << " " << dy << " " << dz << "\n"
+      << "ORIGIN "  << ox << " " << oy << " " << oz << "\n"
+      << "SPACING " << h*s << " " << h*s << " " << h*s << "\n"
+      << "POINT_DATA " << (size_t)dx*dy*dz << "\n"
+      << "SCALARS " << name << " float 1\nLOOKUP_TABLE default\n";
+    for( uint32_t k = 0; k < nz; k += s )
+        for( uint32_t j = 0; j < ny; j += s )
+            for( uint32_t i = 0; i < nx; i += s ) {
+                float v = to_be_float( f(i,j,k) );
+                o.write( (char*)&v, 4 );
+            }
+    o.close();
+}
+
 void simu( int argc, char **argv )
 {
     ibsimu.set_message_threshold( MSG_VERBOSE, 1 );
@@ -358,6 +392,24 @@ void simu( int argc, char **argv )
             std::printf("wrote PNGs: beam_zx.png, beam_zx_closeup.png, beam_xy_plane.png\n");
         } catch( Error e ) {
             std::printf("WARNING: PNG plotting failed (state .dat files already saved)\n");
+            e.print_error_message( ibsimu.message(0) );
+        }
+    }
+
+    // ----------------------------- VTK volumes (ParaView 3-D) --------------
+    // Potential + beam-density as STRUCTURED_POINTS volumes. Downsample with
+    // VTK_STRIDE to keep files small (default 2 -> 1/8 nodes). Set WRITE_VTK=0
+    // to skip (the density field allocates one extra mesh-sized array).
+    if( envi("WRITE_VTK", 1) ) {
+        try {
+            const int stride = envi("VTK_STRIDE", 2);
+            write_vtk_scalar( opath("epot.vtk"), "potential", epot, stride );
+            MeshScalarField tdens( geom );
+            pdb.build_trajectory_density_field( tdens );
+            write_vtk_scalar( opath("beam_density.vtk"), "beam_density", tdens, stride );
+            std::printf("wrote VTK: epot.vtk, beam_density.vtk (stride=%d)\n", stride);
+        } catch( Error e ) {
+            std::printf("WARNING: VTK export failed (state .dat files already saved)\n");
             e.print_error_message( ibsimu.message(0) );
         }
     }

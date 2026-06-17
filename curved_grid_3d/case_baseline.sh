@@ -37,4 +37,9 @@ export ION_MAX_STEPS=4000
 export SC_ALPHA=0.5             # space-charge averaging factor
 export ION_THREADS=1            # IBSimu Poisson solve is single-core
 
+# ---- visualisation outputs ----
+export WRITE_PNG=1               # GeomPlotter cross-section PNGs (headless)
+export WRITE_VTK=1               # epot.vtk + beam_density.vtk for ParaView
+export VTK_STRIDE=2             # downsample VTK (2 -> 1/8 nodes); raise for full run
+
 export RESULTS_DIR=results_3d
