@@ -32,7 +32,7 @@ export ION_J_SCALE=1.0
 
 # ---- solver / iteration ----
 export ION_NPART=60000          # total trajectories (~250 per aperture)
-export ION_ITER_MAX=12          # self-consistent Vlasov iterations
+export ION_ITER_MAX=15          # self-consistent Vlasov iterations (divergence settles slowly)
 export ION_MAX_STEPS=4000
 export SC_ALPHA=0.5             # space-charge averaging factor
 export ION_THREADS=1            # IBSimu Poisson solve is single-core
@@ -41,5 +41,7 @@ export ION_THREADS=1            # IBSimu Poisson solve is single-core
 export WRITE_PNG=1               # GeomPlotter cross-section PNGs (headless)
 export WRITE_VTK=1               # epot.vtk + beam_density.vtk for ParaView
 export VTK_STRIDE=2             # downsample VTK (2 -> 1/8 nodes); raise for full run
+export WRITE_ENVELOPE=1         # envelope.csv: beam radius + divergence vs z (waist finder)
+export ENV_NZ=60                # number of z-planes in the envelope scan
 
 export RESULTS_DIR=results_3d

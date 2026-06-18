@@ -352,6 +352,53 @@ void simu( int argc, char **argv )
                     Itot, hadeg, z_diag, hist_I.size());
     }
 
+    // ----------------------------- axial envelope scan ---------------------
+    // Beam radius and divergence vs z, so the waist/focus is located and the
+    // merged divergence is read at a meaningful plane (not an arbitrary one).
+    if( envi("WRITE_ENVELOPE", 1) ) {
+        try {
+            const int    NZ = envi("ENV_NZ", 60);
+            const double z0 = envd("ENV_Z0", 0.046);        // just downstream of accel
+            const double z1 = envd("ENV_Z1", LZ - 2.0*H);
+            std::ofstream es( opath("envelope.csv").c_str() );
+            es << "z_m,I_full_A,r_rms_m,r95_m,r_max_m,half_angle_deg\n";
+            for( int iz = 0; iz < NZ; ++iz ) {
+                const double zz = z0 + (z1 - z0) * iz / std::max(1, NZ-1);
+                std::vector<trajectory_diagnostic_e> dg;
+                dg.push_back(DIAG_X);  dg.push_back(DIAG_Y);
+                dg.push_back(DIAG_XP); dg.push_back(DIAG_YP); dg.push_back(DIAG_CURR);
+                TrajectoryDiagnosticData td;
+                try { pdb.trajectories_at_plane( td, AXIS_Z, zz, dg ); }
+                catch( ... ) { continue; }
+                const std::vector<double> &X  = td(0).data();
+                const std::vector<double> &Y  = td(1).data();
+                const std::vector<double> &XP = td(2).data();
+                const std::vector<double> &YP = td(3).data();
+                const std::vector<double> &CU = td(4).data();
+                double I = 0.0, sr2 = 0.0, sdiv2 = 0.0;
+                std::vector<double> rr;  rr.reserve( CU.size() );
+                for( size_t i = 0; i < CU.size(); ++i ) {
+                    const double r = std::sqrt( X[i]*X[i] + Y[i]*Y[i] );
+                    const double w = CU[i];
+                    I += w; sr2 += w*r*r; sdiv2 += w*(XP[i]*XP[i] + YP[i]*YP[i]);
+                    rr.push_back(r);
+                }
+                double rrms = (I>0.0) ? std::sqrt(sr2/I) : 0.0;
+                double hadeg= (I>0.0) ? std::sqrt(sdiv2/I)*180.0/M_PI : 0.0;
+                double rmax = 0.0, r95 = 0.0;
+                if( !rr.empty() ) { std::sort(rr.begin(), rr.end());
+                    rmax = rr.back(); r95 = rr[(size_t)(0.95*(rr.size()-1))]; }
+                es << zz << "," << 2.0*I << "," << rrms << "," << r95 << ","
+                   << rmax << "," << hadeg << "\n";
+            }
+            es.close();
+            std::printf("wrote envelope.csv (%d planes, z=%.3f..%.3f m)\n", NZ, z0, z1);
+        } catch( Error e ) {
+            std::printf("WARNING: envelope scan failed\n");
+            e.print_error_message( ibsimu.message(0) );
+        }
+    }
+
     // ----------------------------- visualisation (headless PNG) ------------
     // GeomPlotter renders 2-D cut-planes of the 3-D model straight to PNG -- no
     // display/X11 needed. Data is already saved above, so a plotting failure is
