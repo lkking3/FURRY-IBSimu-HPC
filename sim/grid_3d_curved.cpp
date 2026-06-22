@@ -51,6 +51,7 @@
 #include "meshvectorfield.hpp"
 #include "meshscalarfield.hpp"
 #include "particledatabase.hpp"      // ParticleDataBase3D
+#include "particles.hpp"             // ParticleP3D (trajectory points)
 #include "trajectorydiagnostics.hpp"
 #include "geomplotter.hpp"
 #include "config.h"                  // InitialPlasma, AXIS_*
@@ -123,27 +124,81 @@ static float to_be_float( double d )
     std::memcpy( &v, &x, 4 ); return v;
 }
 static void write_vtk_scalar( const std::string &path, const char *name,
-                              MeshScalarField &f, int s )
+                              MeshScalarField &f, int s, bool mirror )
 {
     if( s < 1 ) s = 1;
     const uint32_t nx = f.size(0), ny = f.size(1), nz = f.size(2);
     const double ox = f.origo(0), oy = f.origo(1), oz = f.origo(2), h = f.h();
     const uint32_t dx = (nx-1)/s + 1, dy = (ny-1)/s + 1, dz = (nz-1)/s + 1;
+    // mirror across the x = ox plane (the x=0 symmetry boundary) -> full beam
+    const uint32_t Dx = mirror ? (2*dx - 1) : dx;
+    const double   Ox = mirror ? ( ox - (double)(dx-1)*s*h ) : ox;
     std::ofstream o( path.c_str(), std::ios::binary );
     o << "# vtk DataFile Version 3.0\n"
       << "grid_3d_curved " << name << "\nBINARY\n"
       << "DATASET STRUCTURED_POINTS\n"
-      << "DIMENSIONS " << dx << " " << dy << " " << dz << "\n"
-      << "ORIGIN "  << ox << " " << oy << " " << oz << "\n"
+      << "DIMENSIONS " << Dx << " " << dy << " " << dz << "\n"
+      << "ORIGIN "  << Ox << " " << oy << " " << oz << "\n"
       << "SPACING " << h*s << " " << h*s << " " << h*s << "\n"
-      << "POINT_DATA " << (size_t)dx*dy*dz << "\n"
+      << "POINT_DATA " << (size_t)Dx*dy*dz << "\n"
       << "SCALARS " << name << " float 1\nLOOKUP_TABLE default\n";
     for( uint32_t k = 0; k < nz; k += s )
-        for( uint32_t j = 0; j < ny; j += s )
-            for( uint32_t i = 0; i < nx; i += s ) {
-                float v = to_be_float( f(i,j,k) );
-                o.write( (char*)&v, 4 );
+        for( uint32_t j = 0; j < ny; j += s ) {
+            if( mirror )
+                for( int m = -(int)(dx-1); m <= (int)(dx-1); ++m ) {
+                    uint32_t i = (uint32_t)( std::abs(m) * s );
+                    float v = to_be_float( f(i,j,k) );
+                    o.write( (char*)&v, 4 );
+                }
+            else
+                for( uint32_t i = 0; i < nx; i += s ) {
+                    float v = to_be_float( f(i,j,k) );
+                    o.write( (char*)&v, 4 );
+                }
+        }
+    o.close();
+}
+
+// Write saved particle trajectories as a legacy-VTK POLYDATA line set so the
+// actual beamlets can be viewed in 3-D in ParaView (no display needed). Every
+// 'stride'-th trajectory is written to keep the file manageable.
+static void write_vtk_trajectories( const std::string &path,
+                                    ParticleDataBase3D &pdb, int stride,
+                                    bool mirror, double x0 )
+{
+    if( stride < 1 ) stride = 1;
+    std::vector<uint32_t> sel;
+    for( uint32_t i = 0; i < pdb.size(); i += stride )
+        if( pdb.traj_size(i) >= 2 ) sel.push_back( i );
+    size_t npts = 0;
+    for( uint32_t i : sel ) npts += pdb.traj_size( i );
+    const int blocks = mirror ? 2 : 1;  // block 1 = original, block 2 = x-mirror
+
+    std::ofstream o( path.c_str() );
+    o << "# vtk DataFile Version 3.0\nbeamlet trajectories\nASCII\n"
+      << "DATASET POLYDATA\nPOINTS " << (npts*blocks) << " float\n";
+    for( int b = 0; b < blocks; ++b )
+        for( uint32_t i : sel ) {
+            const uint32_t n = pdb.traj_size( i );
+            for( uint32_t j = 0; j < n; ++j ) {
+                const ParticleP3D &p =
+                    static_cast<const ParticleP3D&>( pdb.trajectory_point( i, j ) );
+                Vec3D L = p.location();
+                double X = (b == 0) ? L[0] : (2.0*x0 - L[0]);
+                o << X << " " << L[1] << " " << L[2] << "\n";
             }
+        }
+    const size_t nlines = sel.size()*blocks;
+    o << "LINES " << nlines << " " << (npts*blocks + nlines) << "\n";
+    size_t off = 0;
+    for( int b = 0; b < blocks; ++b )
+        for( uint32_t i : sel ) {
+            const uint32_t n = pdb.traj_size( i );
+            o << n;
+            for( uint32_t j = 0; j < n; ++j ) o << " " << (off + j);
+            o << "\n";
+            off += n;
+        }
     o.close();
 }
 
@@ -449,12 +504,17 @@ void simu( int argc, char **argv )
     // to skip (the density field allocates one extra mesh-sized array).
     if( envi("WRITE_VTK", 1) ) {
         try {
-            const int stride = envi("VTK_STRIDE", 2);
-            write_vtk_scalar( opath("epot.vtk"), "potential", epot, stride );
+            const int  stride = envi("VTK_STRIDE", 2);
+            const bool mirror = envi("VTK_MIRROR", 1) != 0;   // reflect half -> full beam
+            write_vtk_scalar( opath("epot.vtk"), "potential", epot, stride, mirror );
             MeshScalarField tdens( geom );
             pdb.build_trajectory_density_field( tdens );
-            write_vtk_scalar( opath("beam_density.vtk"), "beam_density", tdens, stride );
-            std::printf("wrote VTK: epot.vtk, beam_density.vtk (stride=%d)\n", stride);
+            write_vtk_scalar( opath("beam_density.vtk"), "beam_density", tdens, stride, mirror );
+            // actual beamlet lines for a 3-D view in ParaView (mirror plane x=0)
+            write_vtk_trajectories( opath("beam_trajectories.vtk"), pdb,
+                                    envi("TRAJ_STRIDE", 4), mirror, 0.0 );
+            std::printf("wrote VTK: epot.vtk, beam_density.vtk, beam_trajectories.vtk "
+                        "(stride=%d, mirror=%d)\n", stride, (int)mirror);
         } catch( Error e ) {
             std::printf("WARNING: VTK export failed (state .dat files already saved)\n");
             e.print_error_message( ibsimu.message(0) );

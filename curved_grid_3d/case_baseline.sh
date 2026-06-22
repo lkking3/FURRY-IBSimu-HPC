@@ -39,8 +39,10 @@ export ION_THREADS=1            # IBSimu Poisson solve is single-core
 
 # ---- visualisation outputs ----
 export WRITE_PNG=1               # GeomPlotter cross-section PNGs (headless)
-export WRITE_VTK=1               # epot.vtk + beam_density.vtk for ParaView
-export VTK_STRIDE=2             # downsample VTK (2 -> 1/8 nodes); raise for full run
+export WRITE_VTK=1               # epot.vtk + beam_density.vtk + beam_trajectories.vtk
+export VTK_MIRROR=1             # reflect the x>=0 half across x=0 -> full beam in the VTK
+export VTK_STRIDE=2             # field-volume downsample (2 -> 1/8 nodes); raise for full run
+export TRAJ_STRIDE=4            # write every Nth beamlet line to beam_trajectories.vtk
 export WRITE_ENVELOPE=1         # envelope.csv: beam radius + divergence vs z (waist finder)
 export ENV_NZ=60                # number of z-planes in the envelope scan
 
