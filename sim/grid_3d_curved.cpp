@@ -232,7 +232,14 @@ void simu( int argc, char **argv )
     const double TP   = envd("ION_TP_EV", 0.0);
     const double TT   = envd("ION_TT_EV", 0.2);
     const double JSC  = envd("ION_J_SCALE", 1.0);
-    const double SC_ALPHA = envd("SC_ALPHA", 0.5);      // space-charge averaging
+    const double SC_ALPHA = envd("SC_ALPHA", 0.5);      // numerical under-relaxation
+    // Physical space-charge compensation in the field-free drift (carried over
+    // from the 2-D module's SC_FACTOR): downstream of SC_RAMP_START_Z the beam's
+    // own charge is scaled by SC_FACTOR (1 = full SC, ->0 = fully neutralised),
+    // ramped over SC_RAMP_LEN_Z (0 = step).
+    const double SC_FACTOR       = envd("SC_FACTOR", 0.0005);     // match 2-D default
+    const double SC_RAMP_START_Z = envd("SC_RAMP_START_Z", 0.050);// just past accel (m)
+    const double SC_RAMP_LEN_Z   = envd("SC_RAMP_LEN_Z", 0.0);    // ramp length (m)
 
     const std::string OUTDIR = envs("RESULTS_DIR","results_3d");
     mkdir( OUTDIR.c_str(), 0777 );
@@ -362,6 +369,27 @@ void simu( int argc, char **argv )
           }
         }
         std::fflush(stdout);
+
+        // physical space-charge compensation in the field-free drift (carried
+        // over from 2-D): scale the beam charge by SC_FACTOR for z >= start.
+        if( SC_FACTOR != 1.0 ) {
+            const uint32_t nx = scharge.size(0), ny = scharge.size(1), nz = scharge.size(2);
+            const double z0 = scharge.origo(2), hz = scharge.h();
+            for( uint32_t k = 0; k < nz; ++k ) {
+                const double z = z0 + hz*k;
+                double f = 1.0;
+                if( z >= SC_RAMP_START_Z ) {
+                    if( SC_RAMP_LEN_Z > 0.0 ) {
+                        double t = std::clamp( (z - SC_RAMP_START_Z)/SC_RAMP_LEN_Z, 0.0, 1.0 );
+                        f = 1.0 + (SC_FACTOR - 1.0)*t;
+                    } else f = SC_FACTOR;
+                }
+                if( f != 1.0 )
+                    for( uint32_t j = 0; j < ny; ++j )
+                        for( uint32_t i = 0; i < nx; ++i )
+                            scharge(i,j,k) *= f;
+            }
+        }
 
         // space-charge averaging for stability (RADIS-style)
         if( it == 0 ) {

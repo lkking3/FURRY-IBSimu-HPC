@@ -34,8 +34,13 @@ export ION_J_SCALE=1.0
 export ION_NPART=60000          # total trajectories (~250 per aperture)
 export ION_ITER_MAX=15          # self-consistent Vlasov iterations (divergence settles slowly)
 export ION_MAX_STEPS=4000
-export SC_ALPHA=0.5             # space-charge averaging factor
+export SC_ALPHA=0.5             # numerical under-relaxation (iteration stability)
 export ION_THREADS=1            # IBSimu Poisson solve is single-core
+
+# ---- drift space-charge compensation (physical; carried over from 2-D) ----
+export SC_FACTOR=${SC_FACTOR:-0.0005}        # 1=full SC, ->0=fully neutralised drift
+export SC_RAMP_START_Z=${SC_RAMP_START_Z:-0.050}  # start of compensation (m, past accel)
+export SC_RAMP_LEN_Z=${SC_RAMP_LEN_Z:-0.0}        # ramp length (m); 0 = step
 
 # ---- visualisation outputs ----
 export WRITE_PNG=1               # GeomPlotter cross-section PNGs (headless)
@@ -46,4 +51,4 @@ export TRAJ_STRIDE=4            # write every Nth beamlet line to beam_trajector
 export WRITE_ENVELOPE=1         # envelope.csv: beam radius + divergence vs z (waist finder)
 export ENV_NZ=60                # number of z-planes in the envelope scan
 
-export RESULTS_DIR=results_3d
+export RESULTS_DIR=${RESULTS_DIR:-results_3d}
