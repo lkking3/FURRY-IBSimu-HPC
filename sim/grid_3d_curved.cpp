@@ -260,40 +260,53 @@ void simu( int argc, char **argv )
     // ----------------------------- geometry --------------------------------
     Int3D meshsize( (int)floor(LX/H)+1, (int)floor(2.0*LY/H)+1, (int)floor(LZ/H)+1 );
     Vec3D origo( 0.0, -LY, 0.0 );
-    Geometry geom( MODE_3D, meshsize, origo, H );
-
     std::printf("3D mesh: %d x %d x %d = %.0f M nodes (h=%.3g m)\n",
                 meshsize[0], meshsize[1], meshsize[2],
                 (double)meshsize[0]*meshsize[1]*meshsize[2]/1e6, H );
 
-    Transformation T;                       // STL (mm) -> sim (m)
-    T.scale( Vec3D( STL_SCALE, STL_SCALE, STL_SCALE ) );
+    // Geometry caching. Building the mesh from STL solids (point-in-solid test
+    // over every node) is the slow step -- hours at fine h. If GEOM_CACHE names a
+    // saved geometry, load it in seconds instead of rebuilding. The cache bakes
+    // in mesh resolution + STL geometry + electrode voltages: delete it whenever
+    // any of H/LX/LY/LZ, the STLs, or VS/VA change.
+    const std::string GEOM_CACHE = envs("GEOM_CACHE", "");
+    auto file_ok = [](const std::string &p){ std::ifstream f(p.c_str()); return f.good(); };
 
-    STLFile *fscr = new STLFile( SCREEN_STL );
-    STLSolid *screen = new STLSolid;
-    screen->set_transformation( T );
-    screen->add_stl_file( fscr );
-    geom.set_solid( 7, screen );
-
-    STLFile *facc = new STLFile( ACCEL_STL );
-    STLSolid *accel = new STLSolid;
-    accel->set_transformation( T );
-    accel->add_stl_file( facc );
-    geom.set_solid( 8, accel );
-
-    // boundary ids: 1 xmin, 2 xmax, 3 ymin, 4 ymax, 5 zmin, 6 zmax
-    geom.set_boundary( 1, Bound(BOUND_NEUMANN,   0.0) );  // x=0 mirror (symmetry)
-    geom.set_boundary( 2, Bound(BOUND_NEUMANN,   0.0) );  // outer radial
-    geom.set_boundary( 3, Bound(BOUND_NEUMANN,   0.0) );  // outer transverse
-    geom.set_boundary( 4, Bound(BOUND_NEUMANN,   0.0) );  // outer transverse
-    geom.set_boundary( 5, Bound(BOUND_DIRICHLET, VS ) );  // upstream plasma chamber
-    geom.set_boundary( 6, Bound(BOUND_NEUMANN,   0.0) );  // downstream drift (open)
-    geom.set_boundary( 7, Bound(BOUND_DIRICHLET, VS ) );  // screen
-    geom.set_boundary( 8, Bound(BOUND_DIRICHLET, VA ) );  // accel
-
-    std::printf("[t=%6.1fs] building mesh (%.0f M nodes)...\n", secs(),
-                (double)meshsize[0]*meshsize[1]*meshsize[2]/1e6); std::fflush(stdout);
-    geom.build_mesh();
+    Geometry *geomp = nullptr;
+    if( !GEOM_CACHE.empty() && file_ok(GEOM_CACHE) ) {
+        std::printf("[t=%6.1fs] loading cached geometry: %s\n", secs(), GEOM_CACHE.c_str());
+        std::fflush(stdout);
+        std::ifstream is( GEOM_CACHE.c_str() );
+        geomp = new Geometry( is );
+    } else {
+        geomp = new Geometry( MODE_3D, meshsize, origo, H );
+        Transformation T;  T.scale( Vec3D( STL_SCALE, STL_SCALE, STL_SCALE ) );
+        STLFile *fscr = new STLFile( SCREEN_STL );
+        STLSolid *screen = new STLSolid; screen->set_transformation(T); screen->add_stl_file(fscr);
+        geomp->set_solid( 7, screen );
+        STLFile *facc = new STLFile( ACCEL_STL );
+        STLSolid *accel = new STLSolid; accel->set_transformation(T); accel->add_stl_file(facc);
+        geomp->set_solid( 8, accel );
+        // boundary ids: 1 xmin, 2 xmax, 3 ymin, 4 ymax, 5 zmin, 6 zmax
+        geomp->set_boundary( 1, Bound(BOUND_NEUMANN,   0.0) );  // x=0 mirror
+        geomp->set_boundary( 2, Bound(BOUND_NEUMANN,   0.0) );
+        geomp->set_boundary( 3, Bound(BOUND_NEUMANN,   0.0) );
+        geomp->set_boundary( 4, Bound(BOUND_NEUMANN,   0.0) );
+        geomp->set_boundary( 5, Bound(BOUND_DIRICHLET, VS ) );  // upstream plasma
+        geomp->set_boundary( 6, Bound(BOUND_NEUMANN,   0.0) );  // downstream drift
+        geomp->set_boundary( 7, Bound(BOUND_DIRICHLET, VS ) );  // screen
+        geomp->set_boundary( 8, Bound(BOUND_DIRICHLET, VA ) );  // accel
+        std::printf("[t=%6.1fs] building mesh (%.0f M nodes, threads=%d)...\n", secs(),
+                    (double)meshsize[0]*meshsize[1]*meshsize[2]/1e6,
+                    envi("ION_THREADS",1)); std::fflush(stdout);
+        geomp->build_mesh();
+        if( !GEOM_CACHE.empty() ) {
+            std::printf("[t=%6.1fs] caching geometry -> %s\n", secs(), GEOM_CACHE.c_str());
+            std::fflush(stdout);
+            geomp->save( GEOM_CACHE );
+        }
+    }
+    Geometry &geom = *geomp;
     std::printf("[t=%6.1fs] building surface triangulation...\n", secs()); std::fflush(stdout);
     geom.build_surface();
     std::printf("[t=%6.1fs] geometry ready\n", secs()); std::fflush(stdout);

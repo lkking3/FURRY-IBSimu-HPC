@@ -35,7 +35,12 @@ export ION_NPART=60000          # total trajectories (~250 per aperture)
 export ION_ITER_MAX=15          # self-consistent Vlasov iterations (divergence settles slowly)
 export ION_MAX_STEPS=4000
 export SC_ALPHA=0.5             # numerical under-relaxation (iteration stability)
-export ION_THREADS=1            # IBSimu Poisson solve is single-core
+export ION_THREADS=${ION_THREADS:-16}   # IBSimu threads mesh build + solver (match SLURM cpus)
+
+# ---- geometry cache: build the mesh once (slow), reuse it across runs/sweep ----
+# Name is tagged by H so resolutions don't collide. Delete the file if you change
+# LX/LY/LZ, the STLs, or VS/VA (those aren't in the name).
+export GEOM_CACHE=${GEOM_CACHE:-geom_cache_h${H}.dat}
 
 # ---- drift space-charge compensation (physical; carried over from 2-D) ----
 export SC_FACTOR=${SC_FACTOR:-0.0005}        # 1=full SC, ->0=fully neutralised drift

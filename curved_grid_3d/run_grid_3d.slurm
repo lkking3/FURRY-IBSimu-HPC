@@ -10,10 +10,13 @@
 #SBATCH --output=logs/grid3d_%j.out
 #SBATCH --error=logs/grid3d_%j.err
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
-#SBATCH --mem=48G
+#SBATCH --cpus-per-task=16          # IBSimu threads the mesh build + solver
+#SBATCH --mem=96G                   # ILU0 solve at h=0.2mm needs ~65-95 GB
 #SBATCH --time=48:00:00
 ## #SBATCH --partition=compute      # set to your large-memory partition
+## For a coarse h=0.3mm run, 32G is plenty; drop --mem to save queue time.
+
+export ION_THREADS=${SLURM_CPUS_PER_TASK:-16}   # match thread count to allocation
 
 set -euo pipefail
 SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
