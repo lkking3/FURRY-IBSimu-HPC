@@ -41,6 +41,7 @@
 #include <algorithm>
 #include <limits>
 #include <sys/stat.h>
+#include <chrono>
 
 #include "geometry.hpp"
 #include "stl_solid.hpp"
@@ -142,7 +143,8 @@ static void write_vtk_scalar( const std::string &path, const char *name,
       << "SPACING " << h*s << " " << h*s << " " << h*s << "\n"
       << "POINT_DATA " << (size_t)Dx*dy*dz << "\n"
       << "SCALARS " << name << " float 1\nLOOKUP_TABLE default\n";
-    for( uint32_t k = 0; k < nz; k += s )
+    uint32_t kdone = 0; const uint32_t kstep = std::max((uint32_t)1, dz/5);  // ~20% ticks
+    for( uint32_t k = 0; k < nz; k += s ) {
         for( uint32_t j = 0; j < ny; j += s ) {
             if( mirror )
                 for( int m = -(int)(dx-1); m <= (int)(dx-1); ++m ) {
@@ -156,6 +158,11 @@ static void write_vtk_scalar( const std::string &path, const char *name,
                     o.write( (char*)&v, 4 );
                 }
         }
+        if( (++kdone % kstep) == 0 || kdone == dz ) {
+            std::printf("    writing %s.vtk: %u%%\n", name, (unsigned)(100*kdone/dz));
+            std::fflush(stdout);
+        }
+    }
     o.close();
 }
 
@@ -206,6 +213,11 @@ void simu( int argc, char **argv )
 {
     ibsimu.set_message_threshold( MSG_VERBOSE, 1 );
     ibsimu.set_thread_count( envi("ION_THREADS", 1) );
+
+    // wall-clock progress timer: secs() = seconds since start of simu()
+    using Clock = std::chrono::steady_clock;
+    const auto T0 = Clock::now();
+    auto secs = [&](){ return std::chrono::duration<double>(Clock::now()-T0).count(); };
 
     // ----------------------------- configuration ---------------------------
     const double H      = envd("H", 2.0e-4);            // cell size [m]
@@ -279,8 +291,12 @@ void simu( int argc, char **argv )
     geom.set_boundary( 7, Bound(BOUND_DIRICHLET, VS ) );  // screen
     geom.set_boundary( 8, Bound(BOUND_DIRICHLET, VA ) );  // accel
 
+    std::printf("[t=%6.1fs] building mesh (%.0f M nodes)...\n", secs(),
+                (double)meshsize[0]*meshsize[1]*meshsize[2]/1e6); std::fflush(stdout);
     geom.build_mesh();
+    std::printf("[t=%6.1fs] building surface triangulation...\n", secs()); std::fflush(stdout);
     geom.build_surface();
+    std::printf("[t=%6.1fs] geometry ready\n", secs()); std::fflush(stdout);
 
     // ----------------------------- solver / plasma -------------------------
     EpotBiCGSTABSolver solver( geom );
@@ -337,12 +353,18 @@ void simu( int argc, char **argv )
     };
 
     // ----------------------------- Vlasov iteration ------------------------
+    double t_iter_sum = 0.0;
     for( int it = 0; it < ITERM; ++it ) {
-        std::printf("[iter %d/%d] solving Poisson ...\n", it+1, ITERM); std::fflush(stdout);
+        const double t_it0 = secs();
+        std::printf("[t=%6.1fs] === Vlasov iter %d/%d (%.0f%% of iterations) ===\n",
+                    secs(), it+1, ITERM, 100.0*it/ITERM); std::fflush(stdout);
+        double ts = secs();
         solver.solve( epot, scharge_ave );
         efield.recalculate();
+        std::printf("[t=%6.1fs]   Poisson + E-field solved (%.1fs)\n", secs(), secs()-ts);
+        std::fflush(stdout);
 
-        std::printf("[iter %d/%d] injecting %zu apertures ...\n", it+1, ITERM, aps.size());
+        std::printf("[t=%6.1fs]   injecting %zu apertures...\n", secs(), aps.size()); std::fflush(stdout);
         pdb.clear();
         for( const Aperture &a : aps ) {
             Vec3D n( a.nx, a.ny, a.nz );
@@ -354,8 +376,11 @@ void simu( int argc, char **argv )
                 E0, TP, TT,
                 c, d1, d2, a.r );
         }
+        ts = secs();
+        std::printf("[t=%6.1fs]   tracing trajectories...\n", secs()); std::fflush(stdout);
         pdb.iterate_trajectories( scharge, efield, bfield );
-        std::printf("[iter %d/%d] traced npart=%u\n", it+1, ITERM, (unsigned)pdb.size());
+        std::printf("[t=%6.1fs]   traced %u particles (%.1fs)\n",
+                    secs(), (unsigned)pdb.size(), secs()-ts); std::fflush(stdout);
 
         // per-iteration convergence readout at the downstream plane
         { double Ih=0.0, rmsd=0.0; size_t npl=0;
@@ -400,12 +425,22 @@ void simu( int argc, char **argv )
             for( uint32_t k = 0; k < nc; ++k )
                 scharge_ave(k) = SC_ALPHA*scharge(k) + b*scharge_ave(k);
         }
+
+        const double t_it = secs() - t_it0;
+        t_iter_sum += t_it;
+        const double avg = t_iter_sum / (it+1);
+        const double eta = avg * (ITERM - it - 1);
+        std::printf("[t=%6.1fs] iter %d/%d complete (%.1fs) | %.0f%% done | avg %.1fs/iter | ETA ~%.1f min\n",
+                    secs(), it+1, ITERM, t_it, 100.0*(it+1)/ITERM, avg, eta/60.0);
+        std::fflush(stdout);
     }
 
     // ----------------------------- save state ------------------------------
+    std::printf("[t=%6.1fs] saving geom/epot/pdb .dat ...\n", secs()); std::fflush(stdout);
     geom.save( opath("geom.dat") );
     epot.save( opath("epot.dat") );
     pdb.save(  opath("pdb.dat")  );
+    std::printf("[t=%6.1fs] state saved\n", secs()); std::fflush(stdout);
 
     // ----------------------------- final diagnostics -----------------------
     // Headline numbers = last iteration's plane readout; convergence history is
@@ -445,7 +480,10 @@ void simu( int argc, char **argv )
             const double z1 = envd("ENV_Z1", LZ - 2.0*H);
             std::ofstream es( opath("envelope.csv").c_str() );
             es << "z_m,I_full_A,r_rms_m,r95_m,r_max_m,half_angle_deg\n";
+            std::printf("[t=%6.1fs] envelope scan over %d z-planes...\n", secs(), NZ); std::fflush(stdout);
             for( int iz = 0; iz < NZ; ++iz ) {
+                if( (iz+1) % std::max(1, NZ/5) == 0 )
+                    { std::printf("    envelope: %d%%\n", 100*(iz+1)/NZ); std::fflush(stdout); }
                 const double zz = z0 + (z1 - z0) * iz / std::max(1, NZ-1);
                 std::vector<trajectory_diagnostic_e> dg;
                 dg.push_back(DIAG_X);  dg.push_back(DIAG_Y);
@@ -486,6 +524,7 @@ void simu( int argc, char **argv )
     // GeomPlotter renders 2-D cut-planes of the 3-D model straight to PNG -- no
     // display/X11 needed. Data is already saved above, so a plotting failure is
     // non-fatal.
+    std::printf("[t=%6.1fs] writing outputs (PNG / VTK)...\n", secs()); std::fflush(stdout);
     if( envi("WRITE_PNG", 1) ) {
         try {
             const int W    = envi("PNG_W", 1800), Hpx = envi("PNG_H", 900);
@@ -548,6 +587,9 @@ void simu( int argc, char **argv )
             e.print_error_message( ibsimu.message(0) );
         }
     }
+
+    std::printf("[t=%6.1fs] ALL DONE (total wall time %.1f min)\n", secs(), secs()/60.0);
+    std::fflush(stdout);
 }
 
 int main( int argc, char **argv )
