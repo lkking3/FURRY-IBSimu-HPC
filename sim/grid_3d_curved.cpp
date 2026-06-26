@@ -274,14 +274,22 @@ void simu( int argc, char **argv )
     const std::string GEOM_CACHE = envs("GEOM_CACHE", "");
     auto file_ok = [](const std::string &p){ std::ifstream f(p.c_str()); return f.good(); };
 
+    const bool from_cache = !GEOM_CACHE.empty() && file_ok(GEOM_CACHE);
     Geometry *geomp = nullptr;
-    if( !GEOM_CACHE.empty() && file_ok(GEOM_CACHE) ) {
+    if( from_cache ) {
         std::printf("[t=%6.1fs] loading cached geometry: %s\n", secs(), GEOM_CACHE.c_str());
         std::fflush(stdout);
         std::ifstream is( GEOM_CACHE.c_str() );
         geomp = new Geometry( is );
     } else {
         geomp = new Geometry( MODE_3D, meshsize, origo, H );
+    }
+
+    // Attach the STL solids in BOTH paths. geom.save() does not serialize the
+    // solid objects, only the rasterized node map -- but particle collision
+    // (Geometry::inside) needs the objects, so they must be re-attached even when
+    // the mesh comes from cache. This is cheap (re-reads the STL; no rasterise).
+    {
         Transformation T;  T.scale( Vec3D( STL_SCALE, STL_SCALE, STL_SCALE ) );
         STLFile *fscr = new STLFile( SCREEN_STL );
         STLSolid *screen = new STLSolid; screen->set_transformation(T); screen->add_stl_file(fscr);
@@ -289,6 +297,9 @@ void simu( int argc, char **argv )
         STLFile *facc = new STLFile( ACCEL_STL );
         STLSolid *accel = new STLSolid; accel->set_transformation(T); accel->add_stl_file(facc);
         geomp->set_solid( 8, accel );
+    }
+
+    if( !from_cache ) {
         // boundary ids: 1 xmin, 2 xmax, 3 ymin, 4 ymax, 5 zmin, 6 zmax
         geomp->set_boundary( 1, Bound(BOUND_NEUMANN,   0.0) );  // x=0 mirror
         geomp->set_boundary( 2, Bound(BOUND_NEUMANN,   0.0) );
