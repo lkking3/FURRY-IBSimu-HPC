@@ -32,9 +32,11 @@ export ION_J_SCALE=1.0
 
 # ---- solver / iteration ----
 export ION_NPART=60000          # total trajectories (~250 per aperture)
-export ION_ITER_MAX=15          # self-consistent Vlasov iterations (divergence settles slowly)
+export ION_ITER_MAX=15          # ceiling; early-stop ends sooner when converged
 export ION_MAX_STEPS=4000
-export SC_ALPHA=0.5             # numerical under-relaxation (iteration stability)
+export SC_ALPHA=0.7             # numerical under-relaxation (higher = faster, less damped)
+export CONV_TOL=0.01            # early stop when current AND half-angle change < 1%/iter
+export CONV_MIN_ITER=4          # but run at least this many iterations first
 export ION_THREADS=${ION_THREADS:-16}   # IBSimu threads mesh build + solver (match SLURM cpus)
 
 # ---- geometry cache: build the mesh once (slow), reuse it across runs/sweep ----

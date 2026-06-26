@@ -241,6 +241,8 @@ void simu( int argc, char **argv )
     const double M_AMU= envd("ION_M_AMU", 40.0);        // Ar+ default
     const int    NPART= envi("ION_NPART", 60000);
     const int    ITERM= envi("ION_ITER_MAX", 12);
+    const double CONV_TOL   = envd("CONV_TOL", 0.01);    // early-stop rel. change tol (1%)
+    const int    CONV_MINIT = envi("CONV_MIN_ITER", 4);  // min iterations before stopping
     const double TP   = envd("ION_TP_EV", 0.0);
     const double TT   = envd("ION_TT_EV", 0.2);
     const double JSC  = envd("ION_J_SCALE", 1.0);
@@ -367,6 +369,7 @@ void simu( int argc, char **argv )
 
     // ----------------------------- Vlasov iteration ------------------------
     double t_iter_sum = 0.0;
+    bool   converged  = false;
     for( int it = 0; it < ITERM; ++it ) {
         const double t_it0 = secs();
         std::printf("[t=%6.1fs] === Vlasov iter %d/%d (%.0f%% of iterations) ===\n",
@@ -402,6 +405,17 @@ void simu( int argc, char **argv )
               std::printf("[iter %d/%d]  I_full=%.4e A  n@plane=%zu  half-angle=%.3f deg\n",
                           it+1, ITERM, 2.0*Ih, npl, rmsd*180.0/M_PI);
               hist_I.push_back(2.0*Ih); hist_div.push_back(rmsd*180.0/M_PI); hist_n.push_back(npl);
+              // early stop: relative change in current AND half-angle both small
+              if( (it+1) >= CONV_MINIT && hist_I.size() >= 2 ) {
+                  const size_t k = hist_I.size();
+                  const double dI = std::fabs(hist_I[k-1]-hist_I[k-2]) / std::max(1e-30, std::fabs(hist_I[k-1]));
+                  const double dA = std::fabs(hist_div[k-1]-hist_div[k-2]) / std::max(1e-30, std::fabs(hist_div[k-1]));
+                  if( dI < CONV_TOL && dA < CONV_TOL ) {
+                      converged = true;
+                      std::printf("[iter %d/%d]  CONVERGED: dI=%.2f%%, d(half-angle)=%.2f%% (< %.1f%%)\n",
+                                  it+1, ITERM, 100*dI, 100*dA, 100*CONV_TOL);
+                  }
+              }
           } catch( ... ) {
               std::printf("[iter %d/%d]  (diag skipped: no plane crossings yet)\n", it+1, ITERM);
           }
@@ -446,6 +460,13 @@ void simu( int argc, char **argv )
         std::printf("[t=%6.1fs] iter %d/%d complete (%.1fs) | %.0f%% done | avg %.1fs/iter | ETA ~%.1f min\n",
                     secs(), it+1, ITERM, t_it, 100.0*(it+1)/ITERM, avg, eta/60.0);
         std::fflush(stdout);
+
+        if( converged ) {
+            std::printf("[t=%6.1fs] early stop at iter %d/%d (converged); skipping remaining %d iterations\n",
+                        secs(), it+1, ITERM, ITERM-(it+1));
+            std::fflush(stdout);
+            break;
+        }
     }
 
     // ----------------------------- save state ------------------------------
