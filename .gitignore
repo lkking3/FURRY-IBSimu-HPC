@@ -3,7 +3,7 @@ results/
 *.log
 *.out
 *.err
-
+SweepResults/
 # ── Compiled binaries ─────────────────────────────────────────────────────────
 sim/two_grid_2d
 sim/multi_grid_2d
@@ -12,6 +12,9 @@ sim/multi_grid_2d_curved
 
 # ── Generated HTML plots ──────────────────────────────────────────────────────
 *.html
+
+# ── Markdown (not tracked) ────────────────────────────────────────────────────
+*.md
 
 # ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
@@ -30,7 +33,7 @@ graphify-out/
 
 # ── Paper writing ─────────────────────────────────────────────────────────────
 Paper Writing/
-
+*.tex
 # ── OS noise ─────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
