@@ -211,12 +211,32 @@ void simu( int argc, char **argv )
     double corr  = Itot>0? srrp/Itot:0.0;
     double emit  = std::sqrt( std::max(0.0, (sr2/std::max(Itot,1e-30))*(srp2/std::max(Itot,1e-30)) - corr*corr) );
 
+    // ---- current accounting: analytic Bohm vs injected vs extracted ----
+    // Resolves whether I_per_bore is physical or a cyl current-normalization
+    // artifact. If extracted ~= injected but both ~= 3.x x analytic Bohm, the
+    // factor is in how add_2d_beam's J maps to total revolved current (a
+    // convention to divide out). If injected ~= analytic Bohm but extracted is
+    // larger, that's nonphysical (a dump bug).
+    double I_inj = 0.0;
+    {   std::vector<trajectory_diagnostic_e> dgi; dgi.push_back(DIAG_CURR);
+        TrajectoryDiagnosticData ti;
+        try { pdb.trajectories_at_plane( ti, AXIS_X, x_emit + 2.0*H, dgi );
+              for( double v : ti(0).data() ) I_inj += v; } catch(...) {}
+    }
+    const double I_bohm = J * M_PI * r_emit * r_emit;      // analytic Bohm over emission disk
+    std::printf("CURRENT CHECK: analytic Bohm(J*pi*r_emit^2)=%.4e A | injected(@emit)=%.4e A | extracted(@exit)=%.4e A\n",
+                I_bohm, I_inj, Itot );
+    std::printf("  ratios: extracted/injected=%.3f  extracted/Bohm=%.3f  injected/Bohm=%.3f\n",
+                (I_inj>0?Itot/I_inj:0.0), (I_bohm>0?Itot/I_bohm:0.0), (I_bohm>0?I_inj/I_bohm:0.0) );
+
     mkdir_parent( OUT_BEAM );
     std::ofstream f( OUT_BEAM.c_str() );
     f << "# meniscus beamlet (axisymmetric) at accel exit; SI units\n";
     f << "# E_eV " << E0 << "  I_per_bore_A " << Itot << "  n_points " << N << "\n";
     f << "# r_rms_m " << rrms << "  rp_rms_rad " << rprms
       << "  rms_emittance_m_rad " << emit << "  r_max_m " << rmax << "\n";
+    f << "# analytic_Bohm_A " << I_bohm << "  injected_A " << I_inj
+      << "  extracted_over_Bohm " << (I_bohm>0?Itot/I_bohm:0.0) << "\n";
     f << "# r_m  rp_rad  curr_A\n";
     f.precision(8);
     for( size_t i=0;i<N;++i )
