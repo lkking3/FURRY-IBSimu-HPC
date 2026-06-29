@@ -503,6 +503,8 @@ void simu( int argc, char **argv )
             for( size_t i = 0; i < Np; i += step ) used += beam.cu[i];
             const double cscale = (used > 0.0) ? beam.I_per_bore / used : 0.0;  // conserve I_per_bore
             const double GA = 2.3999632;   // golden angle -> even azimuthal coverage
+            size_t n_inj=0; double zlo=1e30, zhi=-1e30, Isum=0.0;
+            double s_x[3]={0,0,0}, s_v[3]={0,0,0}; bool sampled=false;     // first-beamlet sample (debug)
             for( const Aperture &a : aps ) {
                 Vec3D n( a.nx, a.ny, a.nz );
                 Vec3D d1, d2; tangent_basis( n, d1, d2 );      // d1,d2 span plane perp n
@@ -519,8 +521,14 @@ void simu( int argc, char **argv )
                     Vec3D v( v_inj*dir[0]/dn, v_inj*dir[1]/dn, v_inj*dir[2]/dn );
                     pdb.add_particle( Ii, Q_E, M_AMU,
                         ParticleP3D( 0.0, x[0], v[0], x[1], v[1], x[2], v[2] ) );
+                    ++n_inj; Isum+=Ii; zlo=std::min(zlo,x[2]); zhi=std::max(zhi,x[2]);
+                    if(!sampled){ for(int k=0;k<3;++k){s_x[k]=x[k];s_v[k]=v[k];} sampled=true; }
                 }
             }
+            if( it == 0 )
+                std::printf("  MENISCUS-INJECT debug: %zu particles, I_inj_half=%.4e A, born z=[%.4f,%.4f] m\n"
+                            "    sample-0  pos=(%.4f,%.4f,%.4f) m  vel=(%.3e,%.3e,%.3e) m/s  (v_z>0 = downstream)\n",
+                            n_inj, Isum, zlo, zhi, s_x[0],s_x[1],s_x[2], s_v[0],s_v[1],s_v[2]);
         }
         ts = secs();
         std::printf("[t=%6.1fs]   tracing trajectories...\n", secs()); std::fflush(stdout);
