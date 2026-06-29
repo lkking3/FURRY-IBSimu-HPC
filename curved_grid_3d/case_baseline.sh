@@ -21,14 +21,27 @@ export APERTURE_FILE=geometry/apertures_screen.dat
 export VS_V=0.0                 # screen / plasma potential
 export VA_V=-10000.0            # accel  (-10 kV)
 
-# ---- plasma + ion species (Ar+, carried over) ----
-export PLASMA_NI_M3=1.0e16
+# ---- plasma + ion species ----
+# n_i tuned so the total extracted current is ~4 A at the current species (m=2):
+#   I scales linearly with PLASMA_NI_M3 (and 1/sqrt(ION_M_AMU)); 4.0e17 -> ~4 A.
+# If you change the species or want a different current, rescale n_i accordingly.
+export PLASMA_NI_M3=4.0e17
 export PLASMA_TE_EV=3.7
 export ION_Q_E=1.0
-export ION_M_AMU=40.0           # Argon
+export ION_M_AMU=2.0            # set to match the run log (q=1, m=2 amu); confirm if wrong
 export ION_TP_EV=0.0
 export ION_TT_EV=0.2
 export ION_J_SCALE=1.0
+
+# ---- injection mode ----
+#   bohm     : Bohm flux emitted at each aperture (this model does extraction).
+#   meniscus : inject the pre-extracted beamlet from meniscus_cell (run that
+#              first to make MENISCUS_FILE); extraction physics + current come
+#              from the fine micro-model, this model does drift + space charge.
+export INJECTION_MODE=${INJECTION_MODE:-bohm}
+export MENISCUS_FILE=${MENISCUS_FILE:-meniscus_cache/meniscus_beamlet.dat}
+export MENISCUS_L_EXTRACT=0.017   # screen surface -> accel exit, along the normal [m]
+export MENISCUS_NPER=500          # macroparticles injected per aperture (meniscus mode)
 
 # ---- solver / iteration ----
 export ION_NPART=60000          # total trajectories (~250 per aperture)
@@ -42,7 +55,7 @@ export ION_THREADS=${ION_THREADS:-16}   # IBSimu threads mesh build + solver (ma
 # ---- geometry cache: build the mesh once (slow), reuse it across runs/sweep ----
 # Name is tagged by H so resolutions don't collide. Delete the file if you change
 # LX/LY/LZ, the STLs, or VS/VA (those aren't in the name).
-export GEOM_CACHE=${GEOM_CACHE:-geom_cache_h${H}.dat}
+export GEOM_CACHE=${GEOM_CACHE:-geom_cache/geom_h${H}.dat}
 
 # ---- drift space-charge compensation (physical; carried over from 2-D) ----
 export SC_FACTOR=${SC_FACTOR:-0.0005}        # 1=full SC, ->0=fully neutralised drift

@@ -68,6 +68,21 @@ static double envd(const char* k, double v){ const char* s=getenv(k); return s?s
 static int    envi(const char* k, int v){ const char* s=getenv(k); return s?atoi(s):v; }
 static std::string envs(const char* k, const char* v){ const char* s=getenv(k); return s?std::string(s):std::string(v); }
 
+// recursively create a directory path (each "/"-separated component)
+static void mkdirs(const std::string &dir){
+    std::string acc;
+    for( size_t i=0;i<dir.size();++i ){
+        if( dir[i]=='/' && !acc.empty() ) mkdir(acc.c_str(),0777);
+        acc += dir[i];
+    }
+    if( !acc.empty() ) mkdir(acc.c_str(),0777);
+}
+// create the parent directory of a file path (so save-to-subfolder works)
+static void mkdir_parent(const std::string &p){
+    size_t s=p.find_last_of('/');
+    if( s!=std::string::npos ) mkdirs( p.substr(0,s) );
+}
+
 // physical constants
 static const double QE  = 1.602176634e-19;   // C
 static const double AMU = 1.66053906660e-27; // kg
@@ -91,6 +106,38 @@ static std::vector<Aperture> read_apertures( const std::string &path )
             out.push_back(a);
     }
     return out;
+}
+
+// Axisymmetric beamlet phase space exported by meniscus_cell:
+//   rows (r, r', current); header carries E_eV and I_per_bore_A.
+struct Beamlet {
+    std::vector<double> r, rp, cu;
+    double E_eV = 0.0, I_per_bore = 0.0;
+};
+static Beamlet read_beamlet( const std::string &path )
+{
+    Beamlet b;
+    std::ifstream in(path.c_str());
+    if( !in.good() )
+        throw( Error( ERROR_LOCATION, (std::string)"cannot open meniscus file: "+path ) );
+    std::string line;
+    while( std::getline(in,line) ) {
+        if( line.empty() ) continue;
+        if( line[0]=='#' ) {                       // scan header for E_eV / I_per_bore_A
+            std::istringstream ss(line.substr(1));
+            std::string tok;
+            while( ss >> tok ) {
+                if( tok=="E_eV" )            ss >> b.E_eV;
+                else if( tok=="I_per_bore_A") ss >> b.I_per_bore;
+            }
+            continue;
+        }
+        std::istringstream ss(line);
+        double r,rp,cu;
+        if( ss >> r >> rp >> cu ) { b.r.push_back(r); b.rp.push_back(rp); b.cu.push_back(cu); }
+    }
+    if( b.I_per_bore <= 0.0 ) { double s=0; for(double c:b.cu) s+=c; b.I_per_bore=s; }
+    return b;
 }
 
 // Build an orthonormal pair (d1,d2) spanning the plane perpendicular to n, such
@@ -234,6 +281,19 @@ void simu( int argc, char **argv )
     const double VA = envd("VA_V", -10000.0);           // accel potential
     const double Z_PLASMA = envd("Z_PLASMA", 0.007);    // plasma fills z < Z_PLASMA [m]
 
+    // Injection mode:
+    //   "bohm"     - fixed Bohm flux emitted at each aperture; this model does
+    //                the extraction (flat-disk approx of the meniscus).
+    //   "meniscus" - inject the pre-extracted beamlet from the axisymmetric
+    //                micro-model (meniscus_cell) at each aperture's accel-exit,
+    //                so extraction physics comes from the fine micro-model and
+    //                this model does drift transport + merged-beam space charge.
+    const std::string INJ_MODE = envs("INJECTION_MODE","bohm");
+    const bool        MEN      = (INJ_MODE == "meniscus");
+    const std::string MEN_FILE = envs("MENISCUS_FILE","meniscus_cache/meniscus_beamlet.dat");
+    const double      MEN_L    = envd("MENISCUS_L_EXTRACT", 0.017); // screen->accel-exit along normal [m]
+    const int         MEN_NPER = envi("MENISCUS_NPER", 500);       // macroparticles per aperture
+
     // plasma + ion species (carried over from the 2-D curved module)
     const double NI   = envd("PLASMA_NI_M3", 1.0e16);
     const double TE   = envd("PLASMA_TE_EV", 3.7);
@@ -314,6 +374,7 @@ void simu( int argc, char **argv )
                     envi("ION_THREADS",1)); std::fflush(stdout);
         geomp->build_mesh();
         if( !GEOM_CACHE.empty() ) {
+            mkdir_parent( GEOM_CACHE );
             std::printf("[t=%6.1fs] caching geometry -> %s\n", secs(), GEOM_CACHE.c_str());
             std::fflush(stdout);
             geomp->save( GEOM_CACHE );
@@ -327,9 +388,15 @@ void simu( int argc, char **argv )
     // ----------------------------- solver / plasma -------------------------
     EpotBiCGSTABSolver solver( geom );
     InitialPlasma initp( AXIS_Z, Z_PLASMA );
-    solver.set_initial_plasma( VS, &initp );
     const double rhoe = -QE * NI;                       // quasi-neutral n_e ~ n_i
-    solver.set_pexp_plasma( rhoe, TE, VS );
+    if( !MEN ) {
+        // bohm mode: this model does the extraction, so it carries the plasma
+        // model. In meniscus mode the extraction is already done in the
+        // micro-model and beamlets are injected at the accel exit, so we solve a
+        // plain (Laplace + beam space-charge) field with no plasma sheath here.
+        solver.set_initial_plasma( VS, &initp );
+        solver.set_pexp_plasma( rhoe, TE, VS );
+    }
 
     EpotField       epot( geom );
     MeshScalarField scharge( geom );
@@ -356,8 +423,31 @@ void simu( int argc, char **argv )
     const double J    = JSC * 0.6 * Q_E * QE * NI * cs;             // [A/m^2]
     const double E0   = std::max( 1.0, std::fabs(VS - VA) );        // [eV]
 
-    std::printf("apertures=%zu  n_per=%d  J=%.3e A/m^2  E0=%.1f eV  species: q=%g m=%g amu\n",
-                aps.size(), n_per, J, E0, Q_E, M_AMU );
+    std::printf("INJECTION_MODE=%s  apertures=%zu  species: q=%g m=%g amu\n",
+                INJ_MODE.c_str(), aps.size(), Q_E, M_AMU );
+    if( !MEN )
+        std::printf("  bohm: n_per=%d  J=%.3e A/m^2  E0=%.1f eV\n", n_per, J, E0);
+
+    // meniscus mode: load the micro-model beamlet and the injection speed
+    Beamlet beam;
+    double v_inj = 0.0;
+    if( MEN ) {
+        beam = read_beamlet( MEN_FILE );
+        const double Eev = (beam.E_eV > 0.0) ? beam.E_eV : E0;
+        const double E_J = Q_E * Eev * QE;                  // KE = q*deltaV
+        v_inj = std::sqrt( 2.0 * E_J / mi );
+        std::printf("  meniscus: %zu phase-space pts, I_per_bore=%.4e A, E=%.1f eV, v=%.3e m/s\n"
+                    "            -> full-grid current ~ %.4e A (2 x %zu apertures)\n",
+                    beam.r.size(), beam.I_per_bore, Eev, v_inj,
+                    2.0*beam.I_per_bore*aps.size(), aps.size());
+    }
+
+    // Total injected current (half grid) -- the denominator for transmission.
+    double I_inj_half = 0.0;
+    if( MEN ) I_inj_half = beam.I_per_bore * (double)aps.size();
+    else      for( const Aperture &a : aps ) I_inj_half += J * M_PI * a.r * a.r;
+    std::printf("  injected current (full grid) = %.4e A\n", 2.0*I_inj_half);
+    std::fflush(stdout);
 
     // Downstream diagnostic plane + per-iteration convergence history.
     const double z_diag = envd("Z_DIAG", LZ - 5.0*H);
@@ -391,17 +481,46 @@ void simu( int argc, char **argv )
         std::printf("[t=%6.1fs]   Poisson + E-field solved (%.1fs)\n", secs(), secs()-ts);
         std::fflush(stdout);
 
-        std::printf("[t=%6.1fs]   injecting %zu apertures...\n", secs(), aps.size()); std::fflush(stdout);
+        std::printf("[t=%6.1fs]   injecting %zu apertures (%s)...\n",
+                    secs(), aps.size(), INJ_MODE.c_str()); std::fflush(stdout);
         pdb.clear();
-        for( const Aperture &a : aps ) {
-            Vec3D n( a.nx, a.ny, a.nz );
-            Vec3D d1, d2; tangent_basis( n, d1, d2 );
-            // emit from 2h upstream of the surface, inside the plasma region
-            Vec3D c( a.cx - 2.0*H*n[0], a.cy - 2.0*H*n[1], a.cz - 2.0*H*n[2] );
-            pdb.add_cylindrical_beam_with_energy(
-                (uint32_t)n_per, J, Q_E, M_AMU,
-                E0, TP, TT,
-                c, d1, d2, a.r );
+        if( !MEN ) {
+            // bohm: fixed Bohm-flux cylindrical beam from each aperture surface
+            for( const Aperture &a : aps ) {
+                Vec3D n( a.nx, a.ny, a.nz );
+                Vec3D d1, d2; tangent_basis( n, d1, d2 );
+                Vec3D c( a.cx - 2.0*H*n[0], a.cy - 2.0*H*n[1], a.cz - 2.0*H*n[2] );
+                pdb.add_cylindrical_beam_with_energy(
+                    (uint32_t)n_per, J, Q_E, M_AMU, E0, TP, TT, c, d1, d2, a.r );
+            }
+        } else {
+            // meniscus: place the micro-model beamlet at each aperture's accel
+            // exit (= surface point + normal*MENISCUS_L_EXTRACT), revolve the
+            // axisymmetric (r, r') distribution azimuthally, inject as particles.
+            const size_t Np   = beam.r.size();
+            const int    step = std::max( 1, (int)( Np / std::max(1, MEN_NPER) ) );
+            double used = 0.0;
+            for( size_t i = 0; i < Np; i += step ) used += beam.cu[i];
+            const double cscale = (used > 0.0) ? beam.I_per_bore / used : 0.0;  // conserve I_per_bore
+            const double GA = 2.3999632;   // golden angle -> even azimuthal coverage
+            for( const Aperture &a : aps ) {
+                Vec3D n( a.nx, a.ny, a.nz );
+                Vec3D d1, d2; tangent_basis( n, d1, d2 );      // d1,d2 span plane perp n
+                Vec3D P0( a.cx + MEN_L*n[0], a.cy + MEN_L*n[1], a.cz + MEN_L*n[2] );
+                for( size_t i = 0; i < Np; i += step ) {
+                    const double ri = beam.r[i], rpi = beam.rp[i], Ii = beam.cu[i]*cscale;
+                    if( Ii <= 0.0 ) continue;
+                    const double phi = std::fmod( (double)(i) * GA, 2.0*M_PI );
+                    const double cp = std::cos(phi), sp = std::sin(phi);
+                    Vec3D er( cp*d1[0]+sp*d2[0], cp*d1[1]+sp*d2[1], cp*d1[2]+sp*d2[2] );
+                    Vec3D x( P0[0]+ri*er[0], P0[1]+ri*er[1], P0[2]+ri*er[2] );
+                    Vec3D dir( n[0]+rpi*er[0], n[1]+rpi*er[1], n[2]+rpi*er[2] );
+                    const double dn = std::sqrt(dir[0]*dir[0]+dir[1]*dir[1]+dir[2]*dir[2]);
+                    Vec3D v( v_inj*dir[0]/dn, v_inj*dir[1]/dn, v_inj*dir[2]/dn );
+                    pdb.add_particle( Ii, Q_E, M_AMU,
+                        ParticleP3D( 0.0, x[0], v[0], x[1], v[1], x[2], v[2] ) );
+                }
+            }
         }
         ts = secs();
         std::printf("[t=%6.1fs]   tracing trajectories...\n", secs()); std::fflush(stdout);
@@ -413,8 +532,9 @@ void simu( int argc, char **argv )
         { double Ih=0.0, rmsd=0.0; size_t npl=0;
           try {
               plane_diag( z_diag, Ih, npl, rmsd );
-              std::printf("[iter %d/%d]  I_full=%.4e A  n@plane=%zu  half-angle=%.3f deg\n",
-                          it+1, ITERM, 2.0*Ih, npl, rmsd*180.0/M_PI);
+              const double trans = (I_inj_half>0.0)? 100.0*Ih/I_inj_half : 0.0;
+              std::printf("[iter %d/%d]  I_full=%.4e A  n@plane=%zu  half-angle=%.3f deg  transmission=%.1f%%\n",
+                          it+1, ITERM, 2.0*Ih, npl, rmsd*180.0/M_PI, trans);
               hist_I.push_back(2.0*Ih); hist_div.push_back(rmsd*180.0/M_PI); hist_n.push_back(npl);
               // early stop: relative change in current AND half-angle both small
               if( (it+1) >= CONV_MINIT && hist_I.size() >= 2 ) {
@@ -495,13 +615,19 @@ void simu( int argc, char **argv )
         const double hadeg = hist_div.empty() ? 0.0 : hist_div.back(); // merged half-angle [deg]
         const size_t Npl   = hist_n.empty()   ? 0   : hist_n.back();
 
+        const double I_inj_full = 2.0*I_inj_half;
+        const double trans_pct  = (I_inj_full>0.0)? 100.0*Itot/I_inj_full : 0.0;
         std::ofstream js( opath("diagnostics.json").c_str() );
         js << "{\n"
+           << "  \"injection_mode\": \"" << INJ_MODE << "\",\n"
            << "  \"apertures_half\": " << aps.size() << ",\n"
+           << "  \"species_q_e\": " << Q_E << ", \"species_m_amu\": " << M_AMU << ",\n"
            << "  \"z_diag_m\": " << z_diag << ",\n"
            << "  \"iterations\": " << hist_I.size() << ",\n"
            << "  \"n_traj_at_plane\": " << Npl << ",\n"
+           << "  \"I_injected_full_A\": " << I_inj_full << ",\n"
            << "  \"I_full_grid_A\": " << Itot << ",\n"
+           << "  \"transmission_pct\": " << trans_pct << ",\n"
            << "  \"merged_half_angle_deg\": " << hadeg << ",\n"
            << "  \"history_I_full_A\": [";
         for( size_t i = 0; i < hist_I.size(); ++i )   js << (i?", ":"") << hist_I[i];
@@ -511,8 +637,9 @@ void simu( int argc, char **argv )
         for( size_t i = 0; i < hist_n.size(); ++i )   js << (i?", ":"") << hist_n[i];
         js << "]\n}\n";
         js.close();
-        std::printf("FINAL: I_full=%.4e A  half-angle=%.3f deg  (z=%.4f, %zu iters)\n",
-                    Itot, hadeg, z_diag, hist_I.size());
+        std::printf("FINAL: I_full=%.4e A (injected %.4e A, transmission %.1f%%)  "
+                    "half-angle=%.3f deg  (z=%.4f, %zu iters)\n",
+                    Itot, I_inj_full, trans_pct, hadeg, z_diag, hist_I.size());
     }
 
     // ----------------------------- axial envelope scan ---------------------

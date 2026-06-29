@@ -24,7 +24,8 @@ args      = [a for a in sys.argv[1:] if not a.startswith('-')]
 RESULTS   = args[0] if args else 'results_3d'              # run output dir
 GEOM_DIR  = 'curved_grid_3d/geometry'                      # electrode STLs (mm)
 MM        = 1.0e-3                                         # STL mm -> sim metres
-Z_TARGET  = 0.2134                                         # drift-end plane (m) = LZ
+Z_CLIP    = 0.17                                           # beam termination plane (m); None to disable
+Z_TARGET  = Z_CLIP if Z_CLIP is not None else 0.2134       # 2.5" target sits at the termination plane
 TARGET_R  = 0.5 * 2.5 * 0.0254                             # 2.5 inch dia -> radius (m)
 SHOT      = None
 if '--screenshot' in sys.argv:
@@ -32,6 +33,11 @@ if '--screenshot' in sys.argv:
     SHOT = sys.argv[i+1] if i+1 < len(sys.argv) else 'scene.png'
 
 def p(f):  return os.path.join(RESULTS, f)
+
+# Wipe any existing pipeline so re-running in the same session doesn't stack a
+# new (clipped) volume on top of the old un-clipped one.
+for _s in list(GetSources().values()):
+    Delete(_s)
 
 view = GetActiveViewOrCreate('RenderView')
 view.OrientationAxesVisibility = 1
@@ -56,7 +62,15 @@ load_electrode(os.path.join(GEOM_DIR, 'accel_pos.stl'),  [0.55, 0.40, 0.30])  # 
 # ----------------------------- beam density (volume) -------------------------
 if os.path.exists(p('beam_density.vtk')):
     bd = LegacyVTKReader(FileNames=[p('beam_density.vtk')])
-    dd = Show(bd, view); dd.SetRepresentationType('Volume')
+    src = bd
+    if Z_CLIP is not None:                       # terminate the beam at z = Z_CLIP
+        clip = Clip(Input=bd)
+        clip.ClipType = 'Plane'
+        clip.ClipType.Origin = [0.0, 0.0, Z_CLIP]
+        clip.ClipType.Normal = [0.0, 0.0, 1.0]
+        clip.Invert = 1                          # keep z < Z_CLIP
+        src = clip
+    dd = Show(src, view); dd.SetRepresentationType('Volume')
     ColorBy(dd, ('POINTS', 'beam_density'))
     ctf = GetColorTransferFunction('beam_density')
     otf = GetOpacityTransferFunction('beam_density')
@@ -81,6 +95,13 @@ if os.path.exists(p('beam_density.vtk')):
 # ----------------------------- trajectories (lines) --------------------------
 if os.path.exists(p('beam_trajectories.vtk')):
     tj = LegacyVTKReader(FileNames=[p('beam_trajectories.vtk')])
+    if Z_CLIP is not None:                       # terminate beamlets at z = Z_CLIP
+        tjc = Clip(Input=tj)
+        tjc.ClipType = 'Plane'
+        tjc.ClipType.Origin = [0.0, 0.0, Z_CLIP]
+        tjc.ClipType.Normal = [0.0, 0.0, 1.0]
+        tjc.Invert = 1                           # keep z < Z_CLIP
+        tj = tjc
     td = Show(tj, view); td.Representation = 'Surface'
     td.AmbientColor = [1.0, 0.85, 0.2]; td.DiffuseColor = [1.0, 0.85, 0.2]
     td.LineWidth = 1.0; td.Opacity = 0.35

@@ -11,3 +11,8 @@ grid_3d_curved: grid_3d_curved.cpp
 
 clean:
 	rm -f grid_3d_curved
+
+meniscus_cell: meniscus_cell.cpp
+	$(CXX) $(CXXFLAGS) meniscus_cell.cpp \
+	  $(shell pkg-config --cflags --libs $(PKG)) \
+	  -o $@
