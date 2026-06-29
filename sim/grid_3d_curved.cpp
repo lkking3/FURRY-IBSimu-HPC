@@ -642,6 +642,39 @@ void simu( int argc, char **argv )
                     Itot, I_inj_full, trans_pct, hadeg, z_diag, hist_I.size());
     }
 
+    // ----------------------------- target-plane footprint ------------------
+    // Per-trajectory (x, y, current) where beamlets cross the target plane, for
+    // a 2-D current-density heatmap (tools/plot_target_heatmap.py). Half model
+    // (x>=0); mirror across x=0 for the full circular surface.
+    if( envi("WRITE_TARGET", 1) ) {
+        try {
+            const double z_tgt = envd("Z_TARGET", z_diag);   // default = diagnostic plane (~0.17 m)
+            std::vector<trajectory_diagnostic_e> dg;
+            dg.push_back( DIAG_X ); dg.push_back( DIAG_Y ); dg.push_back( DIAG_CURR );
+            TrajectoryDiagnosticData td;
+            pdb.trajectories_at_plane( td, AXIS_Z, z_tgt, dg );
+            const std::vector<double> &X = td(0).data();
+            const std::vector<double> &Y = td(1).data();
+            const std::vector<double> &C = td(2).data();
+            std::ofstream tf( opath("target_profile.dat").c_str() );
+            tf << "# beam footprint at target plane z=" << z_tgt
+               << " m  (half model, x>=0; mirror x for the full disk)\n";
+            tf << "# x_m  y_m  current_A\n";
+            tf.precision(8);
+            double Itot_t = 0.0;
+            for( size_t i = 0; i < C.size(); ++i ) {
+                tf << X[i] << " " << Y[i] << " " << C[i] << "\n";
+                Itot_t += C[i];
+            }
+            tf.close();
+            std::printf("wrote target_profile.dat: %zu crossings, I_half=%.4e A at z=%.4f m\n",
+                        C.size(), Itot_t, z_tgt);
+            std::fflush(stdout);
+        } catch( ... ) {
+            std::printf("WARNING: target-profile dump failed (no crossings at z_tgt?)\n");
+        }
+    }
+
     // ----------------------------- axial envelope scan ---------------------
     // Beam radius and divergence vs z, so the waist/focus is located and the
     // merged divergence is read at a meaningful plane (not an arbitrary one).
