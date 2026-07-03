@@ -22,13 +22,14 @@ export VS_V=0.0                 # screen / plasma potential
 export VA_V=-10000.0            # accel  (-10 kV)
 
 # ---- plasma + ion species ----
-# n_i tuned so the total extracted current is ~4 A at the current species (m=2):
-#   I scales linearly with PLASMA_NI_M3 (and 1/sqrt(ION_M_AMU)); 4.0e17 -> ~4 A.
-# If you change the species or want a different current, rescale n_i accordingly.
-export PLASMA_NI_M3=4.0e17
+# DESIGN operating point: n_i = 1.5e18, q = +1, m = 2 amu, 10 kV bias.
+#   Bohm-over-bore (r=1.5 mm) at this density ~= 13.6 mA/bore; the meniscus
+#   micro-model sets the actual per-bore current (see case_meniscus_cell.sh).
+#   I scales linearly with PLASMA_NI_M3 and 1/sqrt(ION_M_AMU).
+export PLASMA_NI_M3=1.5e18
 export PLASMA_TE_EV=3.7
-export ION_Q_E=1.0
-export ION_M_AMU=2.0            # set to match the run log (q=1, m=2 amu); confirm if wrong
+export ION_Q_E=1.0             # q = +1
+export ION_M_AMU=2.0           # m = 2 amu
 export ION_TP_EV=0.0
 export ION_TT_EV=0.2
 export ION_J_SCALE=1.0
@@ -38,16 +39,16 @@ export ION_J_SCALE=1.0
 #   meniscus : inject the pre-extracted beamlet from meniscus_cell (run that
 #              first to make MENISCUS_FILE); extraction physics + current come
 #              from the fine micro-model, this model does drift + space charge.
-export INJECTION_MODE=${INJECTION_MODE:-bohm}
+export INJECTION_MODE=${INJECTION_MODE:-meniscus}   # design workflow: inject the vetted meniscus beamlet
 export MENISCUS_FILE=${MENISCUS_FILE:-meniscus_cache/meniscus_beamlet.dat}
 export MENISCUS_L_EXTRACT=0.017   # screen surface -> accel exit, along the normal [m]
 export MENISCUS_NPER=500          # macroparticles injected per aperture (meniscus mode)
 
 # ---- solver / iteration ----
 export ION_NPART=60000          # total trajectories (~250 per aperture)
-export ION_ITER_MAX=15          # ceiling; early-stop ends sooner when converged
+export ION_ITER_MAX=25          # ceiling; early-stop ends sooner when converged
 export ION_MAX_STEPS=4000
-export SC_ALPHA=0.7             # numerical under-relaxation (higher = faster, less damped)
+export SC_ALPHA=0.25            # under-relaxation; 0.25 damps the high-current meniscus oscillation (0.7 sawtooths)
 export CONV_TOL=0.01            # early stop when current AND half-angle change < 1%/iter
 export CONV_MIN_ITER=4          # but run at least this many iterations first
 export ION_THREADS=${ION_THREADS:-16}   # IBSimu threads mesh build + solver (match SLURM cpus)

@@ -28,8 +28,11 @@ echo "case file : $CASE_FILE"
 # shellcheck disable=SC1090
 source "$CASE_FILE"
 
+# Always rebuild from current source so a stale binary can never silently run.
+# make is a no-op if nothing changed; recompiles if the source is newer.
+echo "building grid_3d_curved..."; ( cd ../sim && make -f Makefile.3d )
 BIN="$(realpath ../sim/grid_3d_curved)"
-[[ -x "$BIN" ]] || { echo "ERROR: build first: (cd ../sim && make -f Makefile.3d)"; exit 1; }
+[[ -x "$BIN" ]] || { echo "ERROR: build failed"; exit 1; }
 
 echo "binary    : $BIN"
 echo "results   : $RESULTS_DIR"

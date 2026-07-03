@@ -14,6 +14,9 @@ CASE="${1:-case_meniscus_cell.sh}"
 # shellcheck disable=SC1090
 source "$CASE"
 export ION_THREADS=${SLURM_CPUS_PER_TASK:-4}
+# Always rebuild from current source so a stale binary (e.g. one missing the
+# CURRENT CHECK diagnostic) can never silently run. make is a no-op if current.
+echo "building meniscus_cell..."; ( cd ../sim && make -f Makefile.3d meniscus_cell )
 BIN="$(realpath ../sim/meniscus_cell)"
-[[ -x "$BIN" ]] || { echo "build first: (cd ../sim && make -f Makefile.3d meniscus_cell)"; exit 1; }
+[[ -x "$BIN" ]] || { echo "ERROR: build failed"; exit 1; }
 echo "started $(date)"; /usr/bin/time -v "$BIN"; echo "finished $(date)"

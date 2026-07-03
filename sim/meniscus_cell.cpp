@@ -229,6 +229,22 @@ void simu( int argc, char **argv )
     std::printf("  ratios: extracted/injected=%.3f  extracted/Bohm=%.3f  injected/Bohm=%.3f\n",
                 (I_inj>0?Itot/I_inj:0.0), (I_bohm>0?Itot/I_bohm:0.0), (I_bohm>0?I_inj/I_bohm:0.0) );
 
+    // ---- hard physical guard ----------------------------------------------
+    // A beamlet cannot carry more current than the Bohm flux supplies over the
+    // emission disk: extracted <= injected <= analytic Bohm. If extracted
+    // exceeds Bohm by >5% the current is over-counted (cyl normalization) or the
+    // solve has not converged -- either way the beamlet is unphysical. Abort so
+    // it is NEVER written to the cache and silently reused downstream.
+    const double ext_over_bohm = (I_bohm>0 ? Itot/I_bohm : 0.0);
+    if( ext_over_bohm > 1.05 ) {
+        std::fprintf(stderr,
+            "FATAL: extracted/Bohm = %.3f > 1.05 -- unphysical per-bore current "
+            "(over-count or unconverged meniscus). Beamlet NOT written. "
+            "Check convergence (MEN_ITER_MAX) and the cyl current normalization.\n",
+            ext_over_bohm );
+        throw( Error( ERROR_LOCATION, "meniscus: extracted current exceeds Bohm supply" ) );
+    }
+
     mkdir_parent( OUT_BEAM );
     std::ofstream f( OUT_BEAM.c_str() );
     f << "# meniscus beamlet (axisymmetric) at accel exit; SI units\n";
