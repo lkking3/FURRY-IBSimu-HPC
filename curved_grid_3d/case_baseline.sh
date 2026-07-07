@@ -5,7 +5,10 @@
 # Source this before launching the binary, or let run_grid_3d.slurm read it.
 
 # ---- geometry / domain (SI metres) ----
-export H=2.0e-4                 # cell size (0.2 mm)  -> ~481 M nodes, ~39 GB
+export H=3.0e-4                 # cell size (0.3 mm) -> ~114 M nodes, ~0.8 B matrix nonzeros.
+                                # DO NOT drop to 0.2 mm on this build: ~481 M nodes -> ~3.4 B
+                                # nonzeros overflows IBSimu's 32-bit CRowMatrix index -> SIGSEGV
+                                # in construct_add(). 0.3 mm is the validated resolution.
 export LX=0.095                 # half radial extent (x>=0, mirror at x=0)
 export LY=0.095                 # +/- transverse extent
 export LZ=0.2134                # axial length (stack + 170 mm drift)
@@ -54,9 +57,11 @@ export CONV_MIN_ITER=4          # but run at least this many iterations first
 export ION_THREADS=${ION_THREADS:-16}   # IBSimu threads mesh build + solver (match SLURM cpus)
 
 # ---- geometry cache: build the mesh once (slow), reuse it across runs/sweep ----
-# Name is tagged by H so resolutions don't collide. Delete the file if you change
-# LX/LY/LZ, the STLs, or VS/VA (those aren't in the name).
-export GEOM_CACHE=${GEOM_CACHE:-geom_cache/geom_h${H}.dat}
+# Name is tagged by H AND the domain dims (LX/LY/LZ) so a mesh built for a shorter
+# domain can never be silently reused for a longer one -- that mismatch put the
+# diagnostic/target plane outside the mesh and gave n@plane=0 / transmission=0%.
+# Still delete the file if you change the STLs or VS/VA (those aren't in the name).
+export GEOM_CACHE=${GEOM_CACHE:-geom_cache/geom_h${H}_x${LX}_y${LY}_z${LZ}.dat}
 
 # ---- drift space-charge compensation (physical; carried over from 2-D) ----
 export SC_FACTOR=${SC_FACTOR:-0.0005}        # 1=full SC, ->0=fully neutralised drift
@@ -71,5 +76,12 @@ export VTK_STRIDE=2             # field-volume downsample (2 -> 1/8 nodes); rais
 export TRAJ_STRIDE=4            # write every Nth beamlet line to beam_trajectories.vtk
 export WRITE_ENVELOPE=1         # envelope.csv: beam radius + divergence vs z (waist finder)
 export ENV_NZ=60                # number of z-planes in the envelope scan
+
+# ---- diagnostic planes ----
+# PIN the target to the physical 2.5" target plane. Do NOT leave this unset: the
+# code default is z_diag (= LZ-5h), which now sits at the domain end (~0.2119 m),
+# not the target -- that would measure the on-target current 42 mm too far
+# downstream and understate it.
+export Z_TARGET=0.17            # physical 2.5" target plane [m]
 
 export RESULTS_DIR=${RESULTS_DIR:-results_3d}
