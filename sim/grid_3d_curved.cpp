@@ -312,8 +312,26 @@ void simu( int argc, char **argv )
     // own charge is scaled by SC_FACTOR (1 = full SC, ->0 = fully neutralised),
     // ramped over SC_RAMP_LEN_Z (0 = step).
     const double SC_FACTOR       = envd("SC_FACTOR", 0.0005);     // match 2-D default
-    const double SC_RAMP_START_Z = envd("SC_RAMP_START_Z", 0.050);// just past accel (m)
-    const double SC_RAMP_LEN_Z   = envd("SC_RAMP_LEN_Z", 0.0);    // ramp length (m)
+    double       SC_RAMP_START_Z = envd("SC_RAMP_START_Z", 0.050);// plane-mode onset (m); may be auto-snapped
+    const double SC_RAMP_LEN_Z   = envd("SC_RAMP_LEN_Z", 0.0);    // ramp length (m; radial-m in sphere mode)
+    // Onset-surface geometry for the compensation ramp:
+    //   SC_RAMP_MODE=plane  : compensate where z >= SC_RAMP_START_Z (flat plane)
+    //             =sphere    : compensate where |P - focus| <= R_start. The grid is
+    //                          dished, so its accel exits span a range of z; a flat
+    //                          plane over-/under-compensates different beamlets.
+    //                          The spherical onset is concentric with the grid, so
+    //                          every beamlet gets the SAME path length of un-
+    //                          compensated near-field past its own accel exit.
+    //   SC_RAMP_SNAP_ACCEL=1 : auto-derive the onset from the accel-exit points
+    //                          (aperture + MENISCUS_L_EXTRACT*normal). Sphere mode is
+    //                          snapped by construction; in plane mode this sets
+    //                          SC_RAMP_START_Z to the earliest accel-exit z.
+    //   SC_RAMP_START_OFFSET : distance downstream of the accel-exit surface where
+    //                          compensation begins (m); 0 = right at the exit.
+    const std::string SC_RAMP_MODE  = envs("SC_RAMP_MODE","plane");
+    const bool        SC_SNAP_ACCEL = envi("SC_RAMP_SNAP_ACCEL",0)!=0;
+    const double      SC_RAMP_OFFSET= envd("SC_RAMP_START_OFFSET",0.0);
+    const bool        SC_SPHERE     = (SC_RAMP_MODE=="sphere");
 
     const std::string OUTDIR = envs("RESULTS_DIR","results_3d");
     mkdir( OUTDIR.c_str(), 0777 );
@@ -423,8 +441,29 @@ void simu( int argc, char **argv )
     const double J    = JSC * 0.6 * Q_E * QE * NI * cs;             // [A/m^2]
     const double E0   = std::max( 1.0, std::fabs(VS - VA) );        // [eV]
 
+    // Mirror-plane de-duplication (full-grid current normalization).
+    // The model is the x>=0 half with a mirror at x=0; full-grid quantities are
+    // formed as 2 x (half). Apertures lying ON the mirror plane (|cx| ~ 0) are
+    // their OWN mirror image, so a naive x2 counts them twice: 2 x 210 = 420,
+    // whereas the true grid has 2*(210-N0)+N0 = 397 bores. Half-weight the on-
+    // plane apertures so the injected/normalization current uses the 397-bore
+    // basis. NOTE: the *measured* current already excludes the on-plane
+    // apertures' x<0 halves (born outside the mesh), so it is ALREADY on the
+    // 397 basis -- which is why the old run reported transmission = 5.41/5.72 =
+    // 0.946 = 397/420 (an artifact, not real loss). Only the denominator here
+    // needs fixing; the injection loops below are left untouched on purpose.
+    const double X_MIRROR_TOL = envd("X_MIRROR_TOL", 2.0*H);
+    std::vector<double> ap_w( aps.size(), 1.0 );
+    size_t n_onplane = 0;
+    for( size_t k = 0; k < aps.size(); ++k )
+        if( std::fabs(aps[k].cx) <= X_MIRROR_TOL ) { ap_w[k] = 0.5; ++n_onplane; }
+    double bore_eff = 0.0; for( double w : ap_w ) bore_eff += 2.0*w;   // effective full-grid bores
+
     std::printf("INJECTION_MODE=%s  apertures=%zu  species: q=%g m=%g amu\n",
                 INJ_MODE.c_str(), aps.size(), Q_E, M_AMU );
+    std::printf("  mirror-plane de-dup: %zu of %zu apertures on x=0 (|cx|<=%.2e m) half-weighted"
+                " -> effective full-grid bores = %.0f\n",
+                n_onplane, aps.size(), X_MIRROR_TOL, bore_eff );
     if( !MEN )
         std::printf("  bohm: n_per=%d  J=%.3e A/m^2  E0=%.1f eV\n", n_per, J, E0);
 
@@ -437,17 +476,66 @@ void simu( int argc, char **argv )
         const double E_J = Q_E * Eev * QE;                  // KE = q*deltaV
         v_inj = std::sqrt( 2.0 * E_J / mi );
         std::printf("  meniscus: %zu phase-space pts, I_per_bore=%.4e A, E=%.1f eV, v=%.3e m/s\n"
-                    "            -> full-grid current ~ %.4e A (2 x %zu apertures)\n",
+                    "            -> full-grid current ~ %.4e A (%.0f effective bores)\n",
                     beam.r.size(), beam.I_per_bore, Eev, v_inj,
-                    2.0*beam.I_per_bore*aps.size(), aps.size());
+                    beam.I_per_bore*bore_eff, bore_eff);
     }
 
     // Total injected current (half grid) -- the denominator for transmission.
     double I_inj_half = 0.0;
-    if( MEN ) I_inj_half = beam.I_per_bore * (double)aps.size();
-    else      for( const Aperture &a : aps ) I_inj_half += J * M_PI * a.r * a.r;
-    std::printf("  injected current (full grid) = %.4e A\n", 2.0*I_inj_half);
+    if( MEN ) for( size_t k = 0; k < aps.size(); ++k ) I_inj_half += ap_w[k] * beam.I_per_bore;
+    else      for( size_t k = 0; k < aps.size(); ++k ) I_inj_half += ap_w[k] * J * M_PI * aps[k].r * aps[k].r;
+    std::printf("  injected current (full grid) = %.4e A  (%.0f effective bores)\n", 2.0*I_inj_half, bore_eff);
     std::fflush(stdout);
+
+    // --- resolve the space-charge-compensation onset surface -----------------
+    // Fit the beam focus (least-squares intersection of the aperture normal lines)
+    // and the mean accel-exit radius, so the ramp onset can (a) snap to the accel
+    // exit and (b) follow the grid curvature as a concentric sphere.
+    Vec3D  sc_focus( 0.0, 0.0, 0.0 );
+    double sc_R_start = 0.0;                         // sphere-mode onset radius from focus
+    {
+        double M[3][3]={{0,0,0},{0,0,0},{0,0,0}}, rhs[3]={0,0,0};
+        std::vector<Vec3D> exits; exits.reserve( aps.size() );
+        double zmin=1e30, zmax=-1e30;
+        for( const Aperture &a : aps ) {
+            double nl=std::sqrt(a.nx*a.nx+a.ny*a.ny+a.nz*a.nz);
+            double u[3]={ a.nx/nl, a.ny/nl, a.nz/nl };
+            double e[3]={ a.cx+MEN_L*u[0], a.cy+MEN_L*u[1], a.cz+MEN_L*u[2] };
+            exits.push_back( Vec3D(e[0],e[1],e[2]) );
+            zmin=std::min(zmin,e[2]); zmax=std::max(zmax,e[2]);
+            // accumulate P = I - u u^T (projector onto the plane perp to the normal)
+            for( int r=0;r<3;++r ) for( int c=0;c<3;++c ) {
+                double Prc=(r==c?1.0:0.0)-u[r]*u[c];
+                M[r][c]+=Prc; rhs[r]+=Prc*e[c];
+            }
+        }
+        auto det3=[]( double m[3][3] ){ return
+            m[0][0]*(m[1][1]*m[2][2]-m[1][2]*m[2][1]) -
+            m[0][1]*(m[1][0]*m[2][2]-m[1][2]*m[2][0]) +
+            m[0][2]*(m[1][0]*m[2][1]-m[1][1]*m[2][0]); };
+        double D=det3(M), sf[3]={0,0,0};
+        if( std::fabs(D)>1e-30 )
+            for( int col=0; col<3; ++col ) {
+                double Mc[3][3]; for(int r=0;r<3;++r) for(int c=0;c<3;++c) Mc[r][c]=(c==col?rhs[r]:M[r][c]);
+                sf[col]=det3(Mc)/D;
+            }
+        sc_focus = Vec3D( sf[0], sf[1], sf[2] );
+        double sr=0.0;
+        for( const Vec3D &e : exits ) {
+            double dx=e[0]-sf[0], dy=e[1]-sf[1], dz=e[2]-sf[2];
+            sr += std::sqrt(dx*dx+dy*dy+dz*dz);
+        }
+        double R_exit = exits.empty()?0.0: sr/(double)exits.size();
+        sc_R_start = R_exit - SC_RAMP_OFFSET;                    // sphere onset (downstream of exit)
+        if( SC_SNAP_ACCEL && !SC_SPHERE ) SC_RAMP_START_Z = zmin + SC_RAMP_OFFSET;  // plane: snap to earliest exit
+        std::printf("  SC ramp: mode=%s snap=%d focus=(%.4f,%.4f,%.4f) m  R_exit=%.4f m  exit_z=[%.4f,%.4f] m\n",
+                    SC_RAMP_MODE.c_str(), (int)SC_SNAP_ACCEL, sf[0],sf[1],sf[2], R_exit, zmin, zmax);
+        if( SC_SPHERE ) std::printf("           spherical onset: |P-focus| <= %.4f m (offset %.4f m past exit)\n",
+                                    sc_R_start, SC_RAMP_OFFSET);
+        else            std::printf("           planar onset: z >= %.4f m\n", SC_RAMP_START_Z);
+        std::fflush(stdout);
+    }
 
     // Downstream diagnostic plane + per-iteration convergence history.
     const double z_diag = envd("Z_DIAG", LZ - 5.0*H);
@@ -565,20 +653,43 @@ void simu( int argc, char **argv )
         // over from 2-D): scale the beam charge by SC_FACTOR for z >= start.
         if( SC_FACTOR != 1.0 ) {
             const uint32_t nx = scharge.size(0), ny = scharge.size(1), nz = scharge.size(2);
-            const double z0 = scharge.origo(2), hz = scharge.h();
+            const double x0 = scharge.origo(0), y0 = scharge.origo(1), z0 = scharge.origo(2), hz = scharge.h();
             for( uint32_t k = 0; k < nz; ++k ) {
                 const double z = z0 + hz*k;
-                double f = 1.0;
-                if( z >= SC_RAMP_START_Z ) {
-                    if( SC_RAMP_LEN_Z > 0.0 ) {
-                        double t = std::clamp( (z - SC_RAMP_START_Z)/SC_RAMP_LEN_Z, 0.0, 1.0 );
-                        f = 1.0 + (SC_FACTOR - 1.0)*t;
-                    } else f = SC_FACTOR;
+                if( !SC_SPHERE ) {
+                    // ---- flat-plane onset: factor depends on z only (fast) ----
+                    double f = 1.0;
+                    if( z >= SC_RAMP_START_Z ) {
+                        if( SC_RAMP_LEN_Z > 0.0 ) {
+                            double t = std::clamp( (z - SC_RAMP_START_Z)/SC_RAMP_LEN_Z, 0.0, 1.0 );
+                            f = 1.0 + (SC_FACTOR - 1.0)*t;
+                        } else f = SC_FACTOR;
+                    }
+                    if( f != 1.0 )
+                        for( uint32_t j = 0; j < ny; ++j )
+                            for( uint32_t i = 0; i < nx; ++i )
+                                scharge(i,j,k) *= f;
+                } else {
+                    // ---- curved (spherical) onset: factor by distance from focus,
+                    //      so the compensation surface is concentric with the dished
+                    //      grid and every beamlet sees the same near-field length ----
+                    const double dz = z - sc_focus[2];
+                    for( uint32_t j = 0; j < ny; ++j ) {
+                        const double dy = (y0 + hz*j) - sc_focus[1];
+                        for( uint32_t i = 0; i < nx; ++i ) {
+                            const double dx = (x0 + hz*i) - sc_focus[0];
+                            const double dist = std::sqrt( dx*dx + dy*dy + dz*dz );
+                            double f = 1.0;
+                            if( dist <= sc_R_start ) {                 // downstream of the exit shell
+                                if( SC_RAMP_LEN_Z > 0.0 ) {
+                                    double t = std::clamp( (sc_R_start - dist)/SC_RAMP_LEN_Z, 0.0, 1.0 );
+                                    f = 1.0 + (SC_FACTOR - 1.0)*t;
+                                } else f = SC_FACTOR;
+                            }
+                            if( f != 1.0 ) scharge(i,j,k) *= f;
+                        }
+                    }
                 }
-                if( f != 1.0 )
-                    for( uint32_t j = 0; j < ny; ++j )
-                        for( uint32_t i = 0; i < nx; ++i )
-                            scharge(i,j,k) *= f;
             }
         }
 

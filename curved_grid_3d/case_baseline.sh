@@ -65,8 +65,17 @@ export GEOM_CACHE=${GEOM_CACHE:-geom_cache/geom_h${H}_x${LX}_y${LY}_z${LZ}.dat}
 
 # ---- drift space-charge compensation (physical; carried over from 2-D) ----
 export SC_FACTOR=${SC_FACTOR:-0.0005}        # 1=full SC, ->0=fully neutralised drift
-export SC_RAMP_START_Z=${SC_RAMP_START_Z:-0.050}  # start of compensation (m, past accel)
-export SC_RAMP_LEN_Z=${SC_RAMP_LEN_Z:-0.0}        # ramp length (m); 0 = step
+export SC_RAMP_LEN_Z=${SC_RAMP_LEN_Z:-0.003}      # ramp length (m; radial-m in sphere mode); 0 = hard step
+# Onset surface. The grid is DISHED, so the meniscus beamlets are born across a
+# range of z (~0.024-0.045 m). A flat z-plane onset leaves the near-field of the
+# early-born (inner) beamlets uncompensated regardless of SC_FACTOR -- which is
+# why cranking compensation didn't close the central hole. Use a spherical onset
+# concentric with the grid so every beamlet gets the same short un-compensated
+# near-field past its own accel exit.
+export SC_RAMP_MODE=${SC_RAMP_MODE:-sphere}       # plane | sphere (sphere follows grid curvature)
+export SC_RAMP_SNAP_ACCEL=${SC_RAMP_SNAP_ACCEL:-1}# auto-snap the onset to the accel-exit surface
+export SC_RAMP_START_OFFSET=${SC_RAMP_START_OFFSET:-0.003}  # begin compensation 3 mm past the exit
+export SC_RAMP_START_Z=${SC_RAMP_START_Z:-0.050}  # plane-mode onset (m); ignored in sphere mode
 
 # ---- visualisation outputs ----
 export WRITE_PNG=1               # GeomPlotter cross-section PNGs (headless)
