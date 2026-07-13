@@ -332,6 +332,27 @@ void simu( int argc, char **argv )
     const bool        SC_SNAP_ACCEL = envi("SC_RAMP_SNAP_ACCEL",0)!=0;
     const double      SC_RAMP_OFFSET= envd("SC_RAMP_START_OFFSET",0.0);
     const bool        SC_SPHERE     = (SC_RAMP_MODE=="sphere");
+    // ---- physics-based exponential neutralisation ramp (charge exchange) ----
+    // The real space-charge removal here is charge-exchange NEUTRALISATION (fast
+    // ion -> fast neutral) in the drift gas, not electron compensation. The ion
+    // fraction decays as exp(-d/L_cx) with distance d past the onset surface, so
+    // the residual space-charge multiplier is
+    //     f(d) = SC_FACTOR + (1-SC_FACTOR)*exp(-d/L_cx)
+    // (=1 at the onset, -> SC_FACTOR far downstream). L_cx = 1/(n_gas*sigma_cx),
+    // n_gas from the drift pressure. This replaces the ad-hoc linear/step ramp
+    // with the measured neutralisation profile (see tools/scc_0d.py; sigma_cx from
+    // ALADDIN / NIM B 241 (2005), 8.68e-16 cm^2 for D+ on D2 at 5 keV/amu).
+    // Enable by setting SC_DRIFT_P_MTORR>0 (compute L_cx) or SC_RAMP_LCX>0 (direct).
+    const double SC_SIGMA_CX = envd("SC_SIGMA_CX_CM2", 8.68e-16) * 1.0e-4;   // cm^2 -> m^2
+    const double SC_DRIFT_P  = envd("SC_DRIFT_P_MTORR", 0.0);                // drift gas pressure
+    const double SC_GAS_T    = envd("SC_GAS_T_K", 300.0);                    // gas temperature (K)
+    double SC_LCX = envd("SC_RAMP_LCX", 0.0);                               // e-folding length (m); explicit override
+    if( SC_LCX <= 0.0 && SC_DRIFT_P > 0.0 ) {
+        const double kB = 1.380649e-23;
+        const double n_gas = (SC_DRIFT_P*1e-3*133.322)/(kB*SC_GAS_T);        // molecules/m^3
+        SC_LCX = 1.0/(n_gas*SC_SIGMA_CX);
+    }
+    const bool SC_EXP = (SC_LCX > 0.0);   // use exponential neutralisation profile
 
     const std::string OUTDIR = envs("RESULTS_DIR","results_3d");
     mkdir( OUTDIR.c_str(), 0777 );
@@ -534,6 +555,12 @@ void simu( int argc, char **argv )
         if( SC_SPHERE ) std::printf("           spherical onset: |P-focus| <= %.4f m (offset %.4f m past exit)\n",
                                     sc_R_start, SC_RAMP_OFFSET);
         else            std::printf("           planar onset: z >= %.4f m\n", SC_RAMP_START_Z);
+        if( SC_EXP )
+            std::printf("           profile: EXPONENTIAL neutralisation  f=%.4g+(1-%.4g)exp(-d/L_cx)  "
+                        "L_cx=%.1f mm (P=%.1f mTorr, sigma_cx=%.2e cm^2)  99%%@%.0f mm\n",
+                        SC_FACTOR, SC_FACTOR, SC_LCX*1e3, SC_DRIFT_P, SC_SIGMA_CX*1e4, -SC_LCX*std::log(0.01)*1e3 );
+        else
+            std::printf("           profile: linear/step ramp over %.4f m\n", SC_RAMP_LEN_Z);
         std::fflush(stdout);
     }
 
@@ -649,43 +676,44 @@ void simu( int argc, char **argv )
         }
         std::fflush(stdout);
 
-        // physical space-charge compensation in the field-free drift (carried
-        // over from 2-D): scale the beam charge by SC_FACTOR for z >= start.
-        if( SC_FACTOR != 1.0 ) {
+        // physical space-charge removal in the drift. The multiplier on the beam
+        // charge is a function of the distance d downstream of the onset surface:
+        //   exponential (SC_EXP): charge-exchange neutralisation,
+        //                         f = SC_FACTOR + (1-SC_FACTOR)*exp(-d/L_cx)
+        //   linear/step (legacy): f ramps 1 -> SC_FACTOR over SC_RAMP_LEN_Z.
+        // Onset surface is a flat plane (z) or a sphere concentric with the dished
+        // grid; the sphere makes the neutralisation follow the curvature, so every
+        // beamlet sees the same path length of un-neutralised near-field.
+        if( SC_FACTOR != 1.0 || SC_EXP ) {
             const uint32_t nx = scharge.size(0), ny = scharge.size(1), nz = scharge.size(2);
             const double x0 = scharge.origo(0), y0 = scharge.origo(1), z0 = scharge.origo(2), hz = scharge.h();
+            auto sc_factor_at = [&]( double d ) -> double {   // d>0 = downstream of onset
+                if( d <= 0.0 ) return 1.0;
+                if( SC_EXP ) return SC_FACTOR + (1.0-SC_FACTOR)*std::exp( -d/SC_LCX );
+                if( SC_RAMP_LEN_Z > 0.0 ) {
+                    double t = std::clamp( d/SC_RAMP_LEN_Z, 0.0, 1.0 );
+                    return 1.0 + (SC_FACTOR - 1.0)*t;
+                }
+                return SC_FACTOR;
+            };
             for( uint32_t k = 0; k < nz; ++k ) {
                 const double z = z0 + hz*k;
                 if( !SC_SPHERE ) {
-                    // ---- flat-plane onset: factor depends on z only (fast) ----
-                    double f = 1.0;
-                    if( z >= SC_RAMP_START_Z ) {
-                        if( SC_RAMP_LEN_Z > 0.0 ) {
-                            double t = std::clamp( (z - SC_RAMP_START_Z)/SC_RAMP_LEN_Z, 0.0, 1.0 );
-                            f = 1.0 + (SC_FACTOR - 1.0)*t;
-                        } else f = SC_FACTOR;
-                    }
+                    // ---- flat-plane onset: distance = z - z_start (fast) ----
+                    const double f = sc_factor_at( z - SC_RAMP_START_Z );
                     if( f != 1.0 )
                         for( uint32_t j = 0; j < ny; ++j )
                             for( uint32_t i = 0; i < nx; ++i )
                                 scharge(i,j,k) *= f;
                 } else {
-                    // ---- curved (spherical) onset: factor by distance from focus,
-                    //      so the compensation surface is concentric with the dished
-                    //      grid and every beamlet sees the same near-field length ----
+                    // ---- curved (spherical) onset: distance = R_start - |P-focus| ----
                     const double dz = z - sc_focus[2];
                     for( uint32_t j = 0; j < ny; ++j ) {
                         const double dy = (y0 + hz*j) - sc_focus[1];
                         for( uint32_t i = 0; i < nx; ++i ) {
                             const double dx = (x0 + hz*i) - sc_focus[0];
                             const double dist = std::sqrt( dx*dx + dy*dy + dz*dz );
-                            double f = 1.0;
-                            if( dist <= sc_R_start ) {                 // downstream of the exit shell
-                                if( SC_RAMP_LEN_Z > 0.0 ) {
-                                    double t = std::clamp( (sc_R_start - dist)/SC_RAMP_LEN_Z, 0.0, 1.0 );
-                                    f = 1.0 + (SC_FACTOR - 1.0)*t;
-                                } else f = SC_FACTOR;
-                            }
+                            const double f = sc_factor_at( sc_R_start - dist );
                             if( f != 1.0 ) scharge(i,j,k) *= f;
                         }
                     }

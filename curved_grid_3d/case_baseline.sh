@@ -73,9 +73,21 @@ export SC_RAMP_LEN_Z=${SC_RAMP_LEN_Z:-0.003}      # ramp length (m; radial-m in 
 # concentric with the grid so every beamlet gets the same short un-compensated
 # near-field past its own accel exit.
 export SC_RAMP_MODE=${SC_RAMP_MODE:-sphere}       # plane | sphere (sphere follows grid curvature)
-export SC_RAMP_SNAP_ACCEL=${SC_RAMP_SNAP_ACCEL:-1}# auto-snap the onset to the accel-exit surface
-export SC_RAMP_START_OFFSET=${SC_RAMP_START_OFFSET:-0.003}  # begin compensation 3 mm past the exit
+export SC_RAMP_SNAP_ACCEL=${SC_RAMP_SNAP_ACCEL:-1}  # auto-snap the onset to the accel-exit surface
+export SC_RAMP_START_OFFSET=${SC_RAMP_START_OFFSET:-0.0}   # neutralisation starts at the accel exit (gas fills the drift); raise for a differentially-pumped gap
 export SC_RAMP_START_Z=${SC_RAMP_START_Z:-0.050}  # plane-mode onset (m); ignored in sphere mode
+
+# ---- physics-based exponential neutralisation ramp (charge exchange) --------
+# The real space-charge removal is charge-exchange NEUTRALISATION (ion -> fast
+# neutral) in the drift gas, not electron compensation. Enabling this makes the
+# beam charge decay as exp(-d/L_cx) past the onset surface, with L_cx computed
+# from the drift pressure and the measured cross section (ALADDIN / NIM B 241
+# (2005): sigma_cx = 8.68e-16 cm^2 for D+ on D2 at 5 keV/amu). See tools/scc_0d.py.
+#   Set SC_DRIFT_P_MTORR=0 to fall back to the legacy linear/step ramp.
+export SC_DRIFT_P_MTORR=${SC_DRIFT_P_MTORR:-60}       # drift gas pressure -> L_cx (0 = legacy ramp)
+export SC_SIGMA_CX_CM2=${SC_SIGMA_CX_CM2:-8.68e-16}   # charge-exchange cross section at 5 keV/amu
+export SC_GAS_T_K=${SC_GAS_T_K:-300}                  # gas temperature (K)
+export SC_RAMP_LCX=${SC_RAMP_LCX:-0}                  # explicit L_cx override (m); 0 = compute from pressure
 
 # ---- visualisation outputs ----
 export WRITE_PNG=1               # GeomPlotter cross-section PNGs (headless)
